@@ -809,12 +809,15 @@ global.utils.serialize_entity = function(entity)
     -- Special handling for power poles
     if entity.type == "electric-pole" then
         local stats = entity.electric_network_statistics
-        local contents_count = 0
-        for name, count in pairs(stats.input_counts) do
-            contents_count = contents_count + count
+        -- Get flow rate over the last 5 seconds (shortest precision available)
+        -- For electric networks, get_flow_count returns Joules per tick
+        -- We sum all input flows (power consumption) to get total network throughput
+        local flow_per_tick = 0
+        for name, _ in pairs(stats.input_counts) do
+            flow_per_tick = flow_per_tick + stats.get_flow_count{name=name, input=true, precision_index=defines.flow_precision_index.five_seconds}
         end
-
-        serialized.flow_rate = contents_count --stats.get_flow_count{name=…, input=…, precision_index=}
+        -- Convert from per-tick to per-second (Watts)
+        serialized.flow_rate = flow_per_tick * 60
     end
 
     -- Add input and output positions if the entity is a splitter
@@ -921,10 +924,12 @@ global.utils.serialize_entity = function(entity)
         for _, connection in pairs(entity.fluidbox.get_pipe_connections(1)) do
             table.insert(serialized.connections, connection.position)
         end
+        -- Get THIS pipe's fluid contents (not the whole system)
         local contents_count = 0
-        for name, count in pairs(entity.fluidbox.get_fluid_system_contents(1)) do
-            contents_count = contents_count + count
-            fluid_name = "\""..name.."\""
+        local fluidbox_contents = entity.fluidbox[1]  -- Individual fluidbox contents
+        if fluidbox_contents then
+            contents_count = fluidbox_contents.amount or 0
+            fluid_name = "\""..fluidbox_contents.name.."\""
         end
         serialized.contents = contents_count
         serialized.fluid = fluid_name
@@ -939,10 +944,12 @@ global.utils.serialize_entity = function(entity)
         for _, connection in pairs(entity.fluidbox.get_pipe_connections(1)) do
             table.insert(serialized.connections, connection.position)
         end
+        -- Get THIS pipe's fluid contents (not the whole system)
         local contents_count = 0
-        for name, count in pairs(entity.fluidbox.get_fluid_system_contents(1)) do
-            contents_count = contents_count + count
-            fluid_name = "\""..name.."\""
+        local fluidbox_contents = entity.fluidbox[1]  -- Individual fluidbox contents
+        if fluidbox_contents then
+            contents_count = fluidbox_contents.amount or 0
+            fluid_name = "\""..fluidbox_contents.name.."\""
         end
         serialized.fluidbox_id = entity.fluidbox.get_fluid_system_id(1)
         serialized.flow_rate = entity.fluidbox.get_flow(1)
