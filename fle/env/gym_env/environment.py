@@ -217,7 +217,6 @@ class FactorioGymEnv(gym.Env):
         enable_vision: bool = False,
     ):
         super().__init__()
-
         self.instance = instance
         self.task = task
         self.error_penalty = error_penalty
@@ -482,13 +481,13 @@ class FactorioGymEnv(gym.Env):
 
         return observation.to_dict(), reward, terminated, truncated, info
 
-    def reset_instance(self, state: Optional[GameState] = None) -> None:
+    def reset_instance(self, state: Optional[GameState] = None, clear_entities: bool = False) -> None:
         """Reset the Factorio instance to a given state or initial state.
 
         Args:
             state: Optional[GameState] to reset to. If None, resets to initial state.
         """
-        self.instance.reset(state)
+        self.instance.reset(state, clear_entities=clear_entities)
 
     def reset(
         self, options: Optional[Dict[str, Any]] = None, seed: Optional[int] = None
@@ -502,7 +501,9 @@ class FactorioGymEnv(gym.Env):
         if options is None:
             options = {}
         game_state = options.get("game_state")
-        self.reset_instance(game_state)
+        clear_entities = options.get("clear_entities", False)
+        print("Resetting environment with options:", options)
+        self.reset_instance(game_state, clear_entities=clear_entities)
 
         self.initial_score, _ = self.instance.namespaces[0].score()
         self.last_observation = None  # Reset last observation

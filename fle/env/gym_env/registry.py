@@ -77,7 +77,7 @@ class FactorioGymRegistry:
         gym.register(
             id=task_key,
             entry_point="fle.env.gym_env.registry:make_factorio_env",
-            kwargs={"spec": spec},
+            kwargs={"spec": spec, "keep_entities": True},
         )
 
     def list_environments(self) -> List[str]:
@@ -97,6 +97,7 @@ def make_factorio_env(spec: GymEnvironmentSpec, run_idx: int, **kwargs) -> Facto
     """Factory function to create a Factorio gym environment"""
     # Create task from the task definition
     task = TaskFactory.create_task(spec.task_config_path)
+    keep_entities = kwargs.get("keep_entities", False)
 
     # Create Factorio instance
     try:
@@ -137,7 +138,7 @@ def make_factorio_env(spec: GymEnvironmentSpec, run_idx: int, **kwargs) -> Facto
         if spec.num_agents > 1:
             instance = run_async_safely(A2AFactorioInstance.create(**common_kwargs))
         else:
-            instance = FactorioInstance(**common_kwargs)
+            instance = FactorioInstance(**common_kwargs, clear_entities=(not keep_entities))
 
         # Set initial speed and unpause
         instance.set_speed_and_unpause(10)
