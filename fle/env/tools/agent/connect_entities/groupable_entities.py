@@ -36,7 +36,8 @@ def _deduplicate_entities(entities: List[Entity]) -> List[Entity]:
 
 
 def _construct_group(
-    id: int, entities: List[Entity], prototype: Prototype, position: Position
+    id: int, entities: List[Entity], prototype: Prototype, position: Position,
+    fluid_handlers: List[Entity] = None,
 ) -> EntityGroup:
     if prototype == Prototype.TransportBelt or isinstance(entities[0], TransportBelt):
         # Always return BeltGroup for consistent return types, even for single belts
@@ -96,7 +97,13 @@ def _construct_group(
         elif all([pipe.flow_rate == 0 for pipe in entities]):
             status = EntityStatus.FULL_OUTPUT
 
-        return PipeGroup(pipes=entities, id=id, status=status, position=position)
+        return PipeGroup(
+            pipes=entities,
+            id=id,
+            status=status,
+            position=position,
+            fluid_handlers=fluid_handlers or [],
+        )
     elif prototype in (
         Prototype.SmallElectricPole,
         Prototype.BigElectricPole,

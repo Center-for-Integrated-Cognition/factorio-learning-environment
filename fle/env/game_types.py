@@ -191,6 +191,7 @@ class Prototype(enum.Enum, metaclass=PrototypeMetaclass):
     StoneWall = "stone-wall", ent.Entity
     Gate = "gate", ent.Entity
     SmallLamp = "small-lamp", ent.Entity
+    Beacon = "beacon", ent.Beacon
 
     NuclearReactor = "nuclear-reactor", ent.Reactor
     UraniumFuelCell = "uranium-fuel-cell", None

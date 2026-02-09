@@ -1,7 +1,7 @@
 from time import sleep
 from typing import List, Set, Union
 
-from fle.env.entities import Position, Entity, EntityGroup
+from fle.env.entities import Position, Entity, EntityGroup, PipeGroup, Pipe
 from fle.env.game_types import Prototype
 from fle.env.tools.agent.connect_entities.groupable_entities import (
     agglomerate_groupable_entities,
@@ -37,6 +37,9 @@ class GetEntities(Tool):
 
             # Handle group prototypes by expanding them to their component types
             expanded_entities = set()
+            # internal_entities are fetched from Lua and used for grouping,
+            # but filtered out of the final result (only groups pass through)
+            internal_entities = set()
             group_requests = set()
 
             for entity in entities:
@@ -56,6 +59,21 @@ class GetEntities(Tool):
                     # For pipe groups, search for pipe types and group them
                     pipe_types = {Prototype.Pipe, Prototype.UndergroundPipe}
                     expanded_entities.update(pipe_types)
+                    # Also fetch all fluid handler types so they can be
+                    # grouped into PipeGroups (direct connections without pipes)
+                    fluid_handler_types = {
+                        Prototype.Boiler,
+                        Prototype.SteamEngine,
+                        Prototype.OffshorePump,
+                        Prototype.Pump,
+                        Prototype.PumpJack,
+                        Prototype.OilRefinery,
+                        Prototype.ChemicalPlant,
+                        Prototype.StorageTank,
+                        Prototype.AssemblingMachine2,
+                        Prototype.AssemblingMachine3,
+                    }
+                    internal_entities.update(fluid_handler_types)
                     group_requests.add(Prototype.PipeGroup)
                 elif entity == Prototype.ElectricityGroup:
                     # For electricity groups, search for pole types and group them
@@ -69,8 +87,8 @@ class GetEntities(Tool):
                 else:
                     expanded_entities.add(entity)
 
-            # Use expanded entities for the Lua query
-            query_entities = expanded_entities
+            # Use expanded + internal entities for the Lua query
+            query_entities = expanded_entities | internal_entities
 
             # Serialize entity_names as a string
             entity_names = (
@@ -120,11 +138,12 @@ class GetEntities(Tool):
                     )
                     continue
 
-                # Apply standard filtering - check against expanded entities too
+                # Apply standard filtering - check against expanded and internal entities too
                 if (
                     entities
                     and matching_prototype not in entities
                     and matching_prototype not in expanded_entities
+                    and matching_prototype not in internal_entities
                 ):
                     continue
 
@@ -189,16 +208,137 @@ class GetEntities(Tool):
             )
 
             if should_group:
-                # get all pipes into a list
+                # Collect all pipes
                 pipes = [
                     entity
                     for entity in entities_list
                     if hasattr(entity, "prototype")
                     and entity.prototype in (Prototype.Pipe, Prototype.UndergroundPipe)
                 ]
-                group = agglomerate_groupable_entities(pipes)
-                [entities_list.remove(pipe) for pipe in pipes]
-                entities_list.extend(group)
+
+                # Collect fluid handlers (non-pipe entities with a fluidbox_id)
+                fluid_handlers = [
+                    entity
+                    for entity in entities_list
+                    if hasattr(entity, "fluidbox_id")
+                    and entity.fluidbox_id != 0
+                    and not isinstance(entity, Pipe)
+                ]
+
+                # Build a unified dict: {fluidbox_id: {pipes: [...], handlers: [...]}}
+                fluid_systems = {}
+                for pipe in pipes:
+                    fid = pipe.fluidbox_id
+                    if fid not in fluid_systems:
+                        fluid_systems[fid] = {"pipes": [], "handlers": []}
+                    fluid_systems[fid]["pipes"].append(pipe)
+
+                for handler in fluid_handlers:
+                    # Handlers may participate in multiple fluid systems
+                    handler_ids = getattr(handler, "fluidbox_ids", []) or []
+                    if not handler_ids:
+                        handler_ids = [handler.fluidbox_id]
+                    for fid in handler_ids:
+                        if fid == 0:
+                            continue
+                        if fid not in fluid_systems:
+                            fluid_systems[fid] = {"pipes": [], "handlers": []}
+                        fluid_systems[fid]["handlers"].append(handler)
+
+                # Build PipeGroups from the unified dict
+                if fluid_systems:
+                    # Remove pipes from main list (they are absorbed into groups)
+                    for pipe in pipes:
+                        entities_list.remove(pipe)
+                    # Do NOT remove fluid handlers — they stay as individual entities too
+
+                    from fle.env.entities import EntityStatus
+                    from statistics import mean
+
+                    for fid, members in fluid_systems.items():
+                        group_pipes = members["pipes"]
+                        group_handlers = members["handlers"]
+
+                        # Determine status from pipes if present, else from handlers
+                        if group_pipes:
+                            if any(p.contents > 0 and p.flow_rate > 0 for p in group_pipes):
+                                status = EntityStatus.WORKING
+                            elif all(p.contents == 0 for p in group_pipes):
+                                status = EntityStatus.EMPTY
+                            elif all(p.flow_rate == 0 for p in group_pipes):
+                                status = EntityStatus.FULL_OUTPUT
+                            else:
+                                status = EntityStatus.NORMAL
+                            pos = group_pipes[0].position
+                        else:
+                            # Handler-only group (direct connections, no pipes)
+                            status = EntityStatus.WORKING
+                            pos = group_handlers[0].position
+
+                        entities_list.append(PipeGroup(
+                            id=fid,
+                            pipes=group_pipes,
+                            fluid_handlers=group_handlers,
+                            status=status,
+                            position=pos,
+                        ))
+
+                # Second pass: group directly-connected fluid handlers
+                # that have no fluid system ID (direct connections, no pipes)
+                ungrouped_handlers = [
+                    entity
+                    for entity in entities_list
+                    if hasattr(entity, "fluidbox_neighbours")
+                    and entity.fluidbox_neighbours
+                    and getattr(entity, "fluidbox_id", 0) == 0
+                    and not isinstance(entity, Pipe)
+                ]
+
+                if ungrouped_handlers:
+                    # Build lookup: entity id -> entity object
+                    id_to_entity = {e.id: e for e in ungrouped_handlers}
+
+                    # Ensure EntityStatus is imported (may not be if no pipe groups existed)
+                    from fle.env.entities import EntityStatus as ES
+
+                    # Union-Find to discover connected components
+                    parent = {e.id: e.id for e in ungrouped_handlers}
+
+                    def find(x):
+                        while parent[x] != x:
+                            parent[x] = parent[parent[x]]
+                            x = parent[x]
+                        return x
+
+                    def union(a, b):
+                        ra, rb = find(a), find(b)
+                        if ra != rb:
+                            parent[ra] = rb
+
+                    for handler in ungrouped_handlers:
+                        for neighbour_id in handler.fluidbox_neighbours:
+                            if neighbour_id in id_to_entity:
+                                union(handler.id, neighbour_id)
+
+                    # Collect components
+                    components = {}
+                    for handler in ungrouped_handlers:
+                        root = find(handler.id)
+                        if root not in components:
+                            components[root] = []
+                        components[root].append(handler)
+
+                    # Create PipeGroups with synthetic negative IDs
+                    synthetic_id = -1
+                    for root, members in components.items():
+                        entities_list.append(PipeGroup(
+                            id=synthetic_id,
+                            pipes=[],
+                            fluid_handlers=members,
+                            status=ES.WORKING,
+                            position=members[0].position,
+                        ))
+                        synthetic_id -= 1
 
                 poles = [
                     entity
@@ -247,6 +387,8 @@ class GetEntities(Tool):
                 filtered_entities = []
                 for entity in entities_list:
                     # Check entity prototype or group type
+                    # Note: internal_entities are deliberately excluded here —
+                    # they were only fetched for grouping, not for direct return
                     if hasattr(entity, "prototype") and (
                         entity.prototype in entities
                         or entity.prototype in expanded_entities

@@ -1327,6 +1327,7 @@ global.utils.serialize_entity = function(entity)
         if fluid_box and #fluid_box > 0 then
             serialized.fluid_box = {}
             serialized.fluidbox_flows = {}  -- Array of flow rates per fluidbox slot
+            local all_system_ids = {}
             for i = 1, #fluid_box do
                 -- game.print("Fluid!")
                 local fluid = fluid_box[i]
@@ -1335,6 +1336,33 @@ global.utils.serialize_entity = function(entity)
                 end
                 -- Always add flow rate for this slot (even if 0)
                 table.insert(serialized.fluidbox_flows, fluid_box.get_flow(i) or 0)
+                -- Collect fluid system IDs for grouping
+                local system_id = fluid_box.get_fluid_system_id(i)
+                if system_id then
+                    table.insert(all_system_ids, system_id)
+                end
+            end
+            -- Export fluidbox_id (first system) and fluidbox_ids (all systems)
+            if #all_system_ids > 0 then
+                serialized.fluidbox_id = all_system_ids[1]
+                serialized.fluidbox_ids = all_system_ids
+            end
+
+            -- Export connected entity unit_numbers for direct-connection grouping
+            -- Uses get_connections() which works even without pipes
+            local connected_entities = {}
+            for i = 1, #fluid_box do
+                local connections = fluid_box.get_connections(i)
+                if connections then
+                    for _, conn in pairs(connections) do
+                        if conn.owner and conn.owner.unit_number then
+                            table.insert(connected_entities, conn.owner.unit_number)
+                        end
+                    end
+                end
+            end
+            if #connected_entities > 0 then
+                serialized.fluidbox_neighbours = connected_entities
             end
         end
     end

@@ -79,7 +79,7 @@ class EntityStatus(Enum):
     PREPARING_ROCKET_FOR_LAUNCH = "preparing_rocket_for_launch"
     WAITING_TO_LAUNCH_ROCKET = "waiting_to_launch_rocket"
     LAUNCHING_ROCKET = "launching_rocket"
-    # NO_MODULES_TO_TRANSMIT = "no_modules_to_transmit"
+    NO_MODULES_TO_TRANSMIT = "no_modules_to_transmit"
     # RECHARGING_AFTER_POWER_OUTAGE = "recharging_after_power_outage"
     # WAITING_FOR_TARGET_TO_BE_BUILT = "waiting_for_target_to_be_built"
     # WAITING_FOR_TRAIN = "waiting_for_train"
@@ -689,6 +689,11 @@ class FluidHandler(StaticEntity):
     connection_points: List[Position] = []
     fluid_box: Optional[Union[dict, list]] = []
     fluid_systems: Optional[Union[dict, list]] = []
+    fluidbox_id: int = 0
+    fluidbox_ids: List[int] = []
+    fluidbox_neighbours: List[int] = []
+    flow_rate: float = 0
+    contents: float = 0
 
 
 class AdvancedAssemblingMachine(FluidHandler, AssemblingMachine):
@@ -891,6 +896,13 @@ class Lab(Entity, Electric):
         return f"\n\tLab(lab_input={self.lab_input}, status={self.status}, {research_string}electrical_id={self.electrical_id})"
 
 
+class Beacon(Entity, Electric):
+    """A beacon that transmits module effects to nearby machines."""
+
+    _height: float = 3
+    _width: float = 3
+
+
 class Pipe(Entity):
     """A pipe for fluid transport"""
 
@@ -941,13 +953,13 @@ class BeltGroup(EntityGroup):
 
 
 class PipeGroup(EntityGroup):
-    """A connected group of pipes."""
+    """A connected group of pipes and/or fluid-handling machines sharing a fluid system."""
 
-    pipes: List[Pipe]
+    pipes: List[Pipe] = []
+    fluid_handlers: List[Entity] = []
     name: str = "pipe-group"
 
     def __repr__(self) -> str:
-        pipe_summary = f"[{len(self.pipes)} pipes]"
         fluid_suffix = ""
         if self.pipes and self.pipes[0].fluid is not None and self.pipes[0].fluid != "":
             fluid_suffix = f"fluid={self.pipes[0].fluid} "
@@ -956,7 +968,12 @@ class PipeGroup(EntityGroup):
             positions = positions[:3] + ["..."] + positions[-3:]
         pipe_summary = f"[{','.join(positions)}]"
 
-        return f"\n\tPipeGroup(fluid_system={self.id}, {fluid_suffix}position={self.position}, status={self.status}, pipes={pipe_summary})"
+        handler_summary = ""
+        if self.fluid_handlers:
+            handler_names = [f"{h.name}@({h.position.x},{h.position.y})" for h in self.fluid_handlers]
+            handler_summary = f", fluid_handlers=[{','.join(handler_names)}]"
+
+        return f"\n\tPipeGroup(fluid_system={self.id}, {fluid_suffix}position={self.position}, status={self.status}, pipes={pipe_summary}{handler_summary})"
 
     def __str__(self):
         return self.__repr__()
