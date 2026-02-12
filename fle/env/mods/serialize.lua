@@ -632,6 +632,7 @@ global.utils.serialize_entity = function(entity)
     if entity == nil then
         return {}
     end
+
     --game.print("Serializing entity: " .. entity.name .. " with direction: " .. entity.direction)
     local direction = entity.direction
 
@@ -806,12 +807,14 @@ global.utils.serialize_entity = function(entity)
     end
 
     serialized.id = entity.unit_number
+
     -- Special handling for power poles
     if entity.type == "electric-pole" then
         local stats = entity.electric_network_statistics
-        -- Get flow rate over the last 5 seconds (shortest precision available)
-        -- For electric networks, get_flow_count returns Joules per tick
-        -- We sum all input flows (power consumption) to get total network throughput
+        -- Use five_seconds precision (the shortest timescale available in Factorio 1.1).
+        -- Without sample_index, get_flow_count returns the built-in rolling average
+        -- over the precision window — literally the number shown in the bottom
+        -- section of the electric network statistics GUI.
         local flow_per_tick = 0
         for name, _ in pairs(stats.input_counts) do
             flow_per_tick = flow_per_tick + stats.get_flow_count{name=name, input=true, precision_index=defines.flow_precision_index.five_seconds}
@@ -934,7 +937,8 @@ global.utils.serialize_entity = function(entity)
         serialized.contents = contents_count
         serialized.fluid = fluid_name
         serialized.fluidbox_id = entity.fluidbox.get_fluid_system_id(1)
-        serialized.flow_rate = entity.fluidbox.get_flow(1)
+        -- Use 5-second rolling average instead of instantaneous per-tick flow
+        serialized.flow_rate = global.utils.get_sample_avg(entity, "fluidbox_flow_1")
     end
 
     -- Add input and output locations if the entity is a pipe-to-ground
@@ -952,7 +956,8 @@ global.utils.serialize_entity = function(entity)
             fluid_name = "\""..fluidbox_contents.name.."\""
         end
         serialized.fluidbox_id = entity.fluidbox.get_fluid_system_id(1)
-        serialized.flow_rate = entity.fluidbox.get_flow(1)
+        -- Use 5-second rolling average instead of instantaneous per-tick flow
+        serialized.flow_rate = global.utils.get_sample_avg(entity, "fluidbox_flow_1")
         serialized.contents = contents_count
         serialized.fluid = fluid_name
         --serialized.input_position = entity.fluidbox.get_connections(1)[1].position
@@ -1264,15 +1269,17 @@ global.utils.serialize_entity = function(entity)
     end
 
     if entity.type == "solar-panel" then
-        serialized.electric_output_flow_limit = entity.electric_output_flow_limit
+        -- Use 5-second rolling average instead of instantaneous value
+        serialized.electric_output_flow_limit = global.utils.get_sample_avg(entity, "electric_output_flow_limit")
     end
 
     if entity.type == 'accumulator' then
         --serialized.energy_source = entity.energy_source
         --serialized.power_usage = entity.power_usage
         --serialized.emissions = entity.emissions
-        serialized.energy = entity.energy
-        -- Add max energy usage from prototype for consumption rate
+        -- Use 5-second rolling average instead of instantaneous buffer fill
+        serialized.energy = global.utils.get_sample_avg(entity, "energy")
+        -- Add max energy usage from prototype for consumption rate (static, no averaging needed)
         if entity.prototype and entity.prototype.max_energy_usage then
             serialized.max_energy_usage = entity.prototype.max_energy_usage
         end
@@ -1280,8 +1287,9 @@ global.utils.serialize_entity = function(entity)
 
     if entity.type == "generator" then
         serialized.connection_points = global.utils.get_generator_connection_positions(entity)
-        serialized.energy_generated_last_tick = entity.energy_generated_last_tick
-        -- Add prototype rate data for max capacity
+        -- Use 5-second rolling average instead of instantaneous per-tick output
+        serialized.energy_generated_last_tick = global.utils.get_sample_avg(entity, "energy_generated_last_tick")
+        -- Add prototype rate data for max capacity (static, no averaging needed)
         if entity.prototype then
             serialized.max_power_output = entity.prototype.max_power_output
             serialized.fluid_usage_per_tick = entity.prototype.fluid_usage_per_tick
