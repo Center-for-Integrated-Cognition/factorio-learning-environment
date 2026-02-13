@@ -481,6 +481,12 @@ class FactorioGymEnv(gym.Env):
 
         return observation.to_dict(), reward, terminated, truncated, info
 
+    def get_entity_state(self) -> str:
+        return self.instance.get_entity_state()
+
+    def add_entities(self, entities) -> str:
+        return self.instance.add_entities(entities)
+
     def reset_instance(self, state: Optional[GameState] = None, clear_entities: bool = False) -> None:
         """Reset the Factorio instance to a given state or initial state.
 

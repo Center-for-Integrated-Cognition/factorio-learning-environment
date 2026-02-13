@@ -341,6 +341,19 @@ class FactorioInstance:
         """Set speed and ensure game is unpaused - common use case"""
         self.game_control.set_speed_and_unpause(speed)
 
+    def get_entity_state(self) -> str:
+        return self.first_namespace._save_entity_state(
+            distance=500, 
+            player_entities=False,
+            resource_entities=False,
+            items_on_ground=False,
+            encode=False,
+            compress=False,
+        )
+
+    def add_entities(self, entities):
+        self.first_namespace._load_entity_state(entities, decompress=False)
+
     def get_system_prompt(self, agent_idx: int = 0) -> str:
         """
         Get the system prompt for the Factorio environment.
