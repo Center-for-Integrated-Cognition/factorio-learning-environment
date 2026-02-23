@@ -122,6 +122,10 @@ if not global.inserter_last_item then
     -- Name of the last item type transferred by each inserter
     global.inserter_last_item = {}
 end
+if not global.drill_prev_progress then
+    -- Previous tick's mining_progress per mining drill (float 0..1)
+    global.drill_prev_progress = {}
+end
 
 --- Register an entity for sampling. Called lazily the first time
 --- serialize.lua encounters an entity that needs averaging.
@@ -159,6 +163,11 @@ global.utils.register_for_sampling = function(entity)
         else
             global.inserter_prev_held[uid] = nil
         end
+    end
+    if entity.type == "mining-drill" then
+        props["mining_output_count"] = 0
+        -- Initialize previous mining_progress
+        global.drill_prev_progress[uid] = entity.mining_progress or 0
     end
 
     global.sample_running_sums[uid] = {}
@@ -286,6 +295,34 @@ script.on_nth_tick(1, function(event)
                 local old = s["transfer_count"][cursor] or 0
                 s["transfer_count"][cursor] = items_this_tick
                 global.sample_running_sums[uid]["transfer_count"] = (global.sample_running_sums[uid]["transfer_count"] or 0) - old + items_this_tick
+            end
+        end
+    end
+
+    -- Sample mining drills: detect mining_progress wrap-arounds (cycle completion)
+    for _, entity in pairs(surface.find_entities_filtered{type="mining-drill", force="player"}) do
+        if entity.valid and entity.unit_number then
+            local uid = entity.unit_number
+            if not global.energy_samples[uid] then
+                global.utils.register_for_sampling(entity)
+            end
+            local s = global.energy_samples[uid]
+            if s and s["mining_output_count"] then
+                local current_progress = entity.mining_progress or 0
+                local prev_progress = global.drill_prev_progress[uid]
+
+                local items_this_tick = 0
+                if prev_progress and prev_progress > 0.5 and current_progress < 0.1 then
+                    -- mining_progress wrapped from near-1 to near-0: one mining cycle completed
+                    items_this_tick = 1
+                end
+
+                global.drill_prev_progress[uid] = current_progress
+
+                -- Write to ring buffer with O(1) running sum update
+                local old = s["mining_output_count"][cursor] or 0
+                s["mining_output_count"][cursor] = items_this_tick
+                global.sample_running_sums[uid]["mining_output_count"] = (global.sample_running_sums[uid]["mining_output_count"] or 0) - old + items_this_tick
             end
         end
     end

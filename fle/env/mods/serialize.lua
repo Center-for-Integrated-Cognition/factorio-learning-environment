@@ -1127,6 +1127,9 @@ global.utils.serialize_entity = function(entity)
         serialized.drop_position.y = math.round(serialized.drop_position.y * 2) / 2
         -- game.print("Mining drill drop position: " .. serpent.line(serialized.drop_position))
 
+        -- Rolling average items-per-second from sampler.lua (mining_output_count is completions/tick)
+        serialized.mining_items_per_second = global.utils.get_sample_avg(entity, "mining_output_count") * 60
+
         -- Get the mining area
         local prototype = game.entity_prototypes[entity.name]
         local mining_area = 1
@@ -1426,6 +1429,21 @@ global.utils.serialize_entity = function(entity)
 
     if entity.electric_network_id then
         serialized.electrical_id = entity.electric_network_id
+    end
+
+    -- Universal electric energy source data for all electric consumers/producers.
+    -- Ensures max_energy_usage and drain are available on every entity type,
+    -- not just the ones that had it added per-type (inserter, boiler, accumulator).
+    if entity.prototype then
+        if entity.prototype.max_energy_usage and not serialized.max_energy_usage then
+            serialized.max_energy_usage = entity.prototype.max_energy_usage
+        end
+        local eesp = entity.prototype.electric_energy_source_prototype
+        if eesp then
+            if eesp.drain then
+                serialized.electric_drain = eesp.drain
+            end
+        end
     end
 
     serialized.direction = get_inverse_entity_direction(entity.name, entity.direction) --api_direction_map[entity.direction]
