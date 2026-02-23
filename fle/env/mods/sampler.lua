@@ -16,6 +16,7 @@
 ---   - "energy_generated_last_tick": entity.energy_generated_last_tick (generator, J/tick)
 ---   - "fluidbox_flow_1"          : entity.fluidbox.get_flow(1) (pipe/pipe-to-ground, units/tick)
 ---   - "electric_output_flow_limit": entity.electric_output_flow_limit (solar panel, J/tick)
+---   - "transfer_count"             : inserter held_stack transitions (items/tick)
 ---
 --- NOTE: electric pole flow_rate uses Factorio's built-in get_flow_count()
 ---   averaging, NOT this sampler. Both use a 5-second window.
@@ -109,6 +110,18 @@ if not global.sampled_entities then
     -- Set of unit_numbers we are actively sampling
     global.sampled_entities = {}
 end
+if not global.sample_running_sums then
+    -- O(1) running sums: global.sample_running_sums[unit_number][property] = sum
+    global.sample_running_sums = {}
+end
+if not global.inserter_prev_held then
+    -- Previous tick's held_stack state per inserter: {name=string, count=number} or nil
+    global.inserter_prev_held = {}
+end
+if not global.inserter_last_item then
+    -- Name of the last item type transferred by each inserter
+    global.inserter_last_item = {}
+end
 
 --- Register an entity for sampling. Called lazily the first time
 --- serialize.lua encounters an entity that needs averaging.
@@ -137,12 +150,24 @@ global.utils.register_for_sampling = function(entity)
         end
         props["fluidbox_flow_1"] = flow
     end
+    if entity.type == "inserter" then
+        props["transfer_count"] = 0
+        -- Initialize previous held_stack state
+        local held = entity.held_stack
+        if held and held.valid_for_read then
+            global.inserter_prev_held[uid] = {name = held.name, count = held.count}
+        else
+            global.inserter_prev_held[uid] = nil
+        end
+    end
 
+    global.sample_running_sums[uid] = {}
     for prop, val in pairs(props) do
         global.energy_samples[uid][prop] = {}
         for i = 1, WINDOW_SIZE do
             global.energy_samples[uid][prop][i] = val
         end
+        global.sample_running_sums[uid][prop] = val * WINDOW_SIZE
     end
 end
 
@@ -158,19 +183,10 @@ global.utils.get_sample_avg = function(entity, property)
         global.utils.register_for_sampling(entity)
     end
 
-    local buf = global.energy_samples[uid] and global.energy_samples[uid][property]
-    if not buf then return 0 end
+    local sums = global.sample_running_sums[uid]
+    if not sums or not sums[property] then return 0 end
 
-    local sum = 0
-    local count = 0
-    for i = 1, WINDOW_SIZE do
-        if buf[i] then
-            sum = sum + buf[i]
-            count = count + 1
-        end
-    end
-    if count == 0 then return 0 end
-    return sum / count
+    return sums[property] / WINDOW_SIZE
 end
 
 --- The tick handler: sample all registered entities.
@@ -197,7 +213,10 @@ script.on_nth_tick(1, function(event)
             end
             local s = global.energy_samples[uid]
             if s and s["energy"] then
-                s["energy"][cursor] = entity.energy or 0
+                local old = s["energy"][cursor] or 0
+                local new = entity.energy or 0
+                s["energy"][cursor] = new
+                global.sample_running_sums[uid]["energy"] = (global.sample_running_sums[uid]["energy"] or 0) - old + new
             end
         end
     end
@@ -211,7 +230,10 @@ script.on_nth_tick(1, function(event)
             end
             local s = global.energy_samples[uid]
             if s and s["energy_generated_last_tick"] then
-                s["energy_generated_last_tick"][cursor] = entity.energy_generated_last_tick or 0
+                local old = s["energy_generated_last_tick"][cursor] or 0
+                local new = entity.energy_generated_last_tick or 0
+                s["energy_generated_last_tick"][cursor] = new
+                global.sample_running_sums[uid]["energy_generated_last_tick"] = (global.sample_running_sums[uid]["energy_generated_last_tick"] or 0) - old + new
             end
         end
     end
@@ -225,7 +247,45 @@ script.on_nth_tick(1, function(event)
             end
             local s = global.energy_samples[uid]
             if s and s["electric_output_flow_limit"] then
-                s["electric_output_flow_limit"][cursor] = entity.electric_output_flow_limit or 0
+                local old = s["electric_output_flow_limit"][cursor] or 0
+                local new = entity.electric_output_flow_limit or 0
+                s["electric_output_flow_limit"][cursor] = new
+                global.sample_running_sums[uid]["electric_output_flow_limit"] = (global.sample_running_sums[uid]["electric_output_flow_limit"] or 0) - old + new
+            end
+        end
+    end
+
+    -- Sample inserters: detect held_stack transitions (item held → empty = completed transfer)
+    for _, entity in pairs(surface.find_entities_filtered{type="inserter", force="player"}) do
+        if entity.valid and entity.unit_number then
+            local uid = entity.unit_number
+            if not global.energy_samples[uid] then
+                global.utils.register_for_sampling(entity)
+            end
+            local s = global.energy_samples[uid]
+            if s and s["transfer_count"] then
+                local held = entity.held_stack
+                local currently_holding = held and held.valid_for_read
+                local prev = global.inserter_prev_held[uid]
+
+                local items_this_tick = 0
+                if prev and not currently_holding then
+                    -- Transition: was holding → now empty = transfer completed
+                    items_this_tick = prev.count or 1
+                    global.inserter_last_item[uid] = prev.name
+                end
+
+                -- Update previous state
+                if currently_holding then
+                    global.inserter_prev_held[uid] = {name = held.name, count = held.count}
+                else
+                    global.inserter_prev_held[uid] = nil
+                end
+
+                -- Write to ring buffer with O(1) running sum update
+                local old = s["transfer_count"][cursor] or 0
+                s["transfer_count"][cursor] = items_this_tick
+                global.sample_running_sums[uid]["transfer_count"] = (global.sample_running_sums[uid]["transfer_count"] or 0) - old + items_this_tick
             end
         end
     end
@@ -241,7 +301,9 @@ script.on_nth_tick(1, function(event)
             if s and s["fluidbox_flow_1"] then
                 local flow = 0
                 pcall(function() flow = entity.fluidbox.get_flow(1) end)
+                local old = s["fluidbox_flow_1"][cursor] or 0
                 s["fluidbox_flow_1"][cursor] = flow
+                global.sample_running_sums[uid]["fluidbox_flow_1"] = (global.sample_running_sums[uid]["fluidbox_flow_1"] or 0) - old + flow
             end
         end
     end

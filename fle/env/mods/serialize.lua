@@ -893,6 +893,14 @@ global.utils.serialize_entity = function(entity)
             serialized.max_energy_usage = entity.prototype.max_energy_usage
         end
 
+        -- Rolling average items-per-second from sampler.lua (transfer_count is items/tick)
+        serialized.items_per_second = global.utils.get_sample_avg(entity, "transfer_count") * 60
+        -- Last item type transferred (stored by sampler's held_stack transition detector)
+        local last_item = global.inserter_last_item and global.inserter_last_item[entity.unit_number]
+        if last_item then
+            serialized.last_item_type = "\""..last_item.."\""
+        end
+
         ---- round to the nearest 0.5
         serialized.pickup_position.x = math.round(serialized.pickup_position.x * 2 ) / 2
         serialized.pickup_position.y = math.round(serialized.pickup_position.y * 2 ) / 2
