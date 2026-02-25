@@ -139,6 +139,7 @@ class Prototype(enum.Enum, metaclass=PrototypeMetaclass):
     SmallElectricPole = "small-electric-pole", ent.ElectricityPole
     MediumElectricPole = "medium-electric-pole", ent.ElectricityPole
     BigElectricPole = "big-electric-pole", ent.ElectricityPole
+    Substation = "substation", ent.ElectricityPole
 
     Coal = "coal", None
     Wood = "wood", None
@@ -186,6 +187,9 @@ class Prototype(enum.Enum, metaclass=PrototypeMetaclass):
     PiercingRoundsMagazine = "piercing-rounds-magazine", ent.Ammo
     FirearmMagazine = "firearm-magazine", ent.Ammo
     Grenade = "grenade", None
+
+    PowerSwitch = "power-switch", ent.Entity
+    ConstantCombinator = "constant-combinator", ent.Entity
 
     Radar = "radar", ent.Entity
     StoneWall = "stone-wall", ent.Entity

@@ -461,7 +461,7 @@ class Entity(EntityCore):
     """Base class for all entities in the game."""
 
     id: Optional[int] = None
-    energy: float
+    energy: float = 0
     type: Optional[str] = None
     dimensions: Dimensions
     tile_dimensions: TileDimensions
@@ -557,6 +557,7 @@ class TransportBelt(Entity):
     inventory: Dict[Literal["left", "right"], Inventory] = {"left": {}, "right": {}}
     is_terminus: bool = False
     is_source: bool = False
+    belt_group_id: int = 0
     _height: float = 1
     _width: float = 1
 

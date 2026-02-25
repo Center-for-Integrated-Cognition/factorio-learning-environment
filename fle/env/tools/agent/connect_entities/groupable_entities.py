@@ -78,7 +78,7 @@ def _construct_group(
             status = EntityStatus.EMPTY
 
         return BeltGroup(
-            id=0,
+            id=id,
             belts=entities,
             inventory=inventory,
             inputs=inputs,
@@ -108,6 +108,7 @@ def _construct_group(
         Prototype.SmallElectricPole,
         Prototype.BigElectricPole,
         Prototype.MediumElectricPole,
+        Prototype.Substation,
     ):
         if any([pole.flow_rate > 0 for pole in entities]):
             status = EntityStatus.WORKING
@@ -608,6 +609,7 @@ def agglomerate_groupable_entities(
         Prototype.SmallElectricPole,
         Prototype.BigElectricPole,
         Prototype.MediumElectricPole,
+        Prototype.Substation,
     ):
         electricity_ids = {}
         for entity in connected_entities:
@@ -659,8 +661,28 @@ def agglomerate_groupable_entities(
         Prototype.FastUndergroundBelt,
         Prototype.ExpressUndergroundBelt,
     ):
-        groups = construct_belt_groups(connected_entities, prototype)
-        return groups
+        # Group belts by their Lua-assigned belt_group_id (stable, persistent)
+        belt_group_ids = {}
+        for entity in connected_entities:
+            gid = getattr(entity, 'belt_group_id', 0)
+            if gid in belt_group_ids:
+                belt_group_ids[gid].append(entity)
+            else:
+                belt_group_ids[gid] = [entity]
+
+        groups = [
+            _construct_group(
+                id=gid,
+                entities=entities,
+                prototype=prototype,
+                position=entities[0].position,
+            )
+            for gid, entities in belt_group_ids.items()
+        ]
+        try:
+            return consolidate_underground_belts(groups)
+        except Exception as e:
+            raise e
 
     raise RuntimeError(
         "Failed to group an entity with prototype: {}".format(prototype.name)

@@ -17,6 +17,8 @@
 ---   - "fluidbox_flow_1"          : entity.fluidbox.get_flow(1) (pipe/pipe-to-ground, units/tick)
 ---   - "electric_output_flow_limit": entity.electric_output_flow_limit (solar panel, J/tick)
 ---   - "transfer_count"             : inserter held_stack transitions (items/tick)
+---   - "is_working"                : 1 if entity.status is a working status, 0 otherwise
+---                                    (rolling avg = utilization ratio 0.0-1.0)
 ---
 --- NOTE: electric pole flow_rate uses Factorio's built-in get_flow_count()
 ---   averaging, NOT this sampler. Both use a 5-second window.
@@ -99,6 +101,26 @@
 
 local WINDOW_SIZE = 300  -- 5 seconds at 60 UPS
 
+-- Statuses that count as "working" (actively carrying out a process) for utilization tracking.
+-- Checked via numeric comparison against defines.entity_status values.
+local WORKING_STATUS_SET = {}
+if defines and defines.entity_status then
+    for _, key in ipairs({"working", "normal", "low_power", "charging", "discharging",
+                          "launching_rocket", "preparing_rocket_for_launch",
+                          "waiting_to_launch_rocket", "low_input_fluid"}) do
+        if defines.entity_status[key] ~= nil then
+            WORKING_STATUS_SET[defines.entity_status[key]] = true
+        end
+    end
+end
+
+-- Entity types that should have is_working tracked but are not already iterated
+-- by other sampler loops (accumulators, generators, solar panels, inserters, drills, pipes).
+local CRAFTING_ENTITY_TYPES = {
+    "assembling-machine", "furnace", "lab", "rocket-silo",
+    "reactor", "beacon", "boiler"
+}
+
 -- Initialize global storage if not present
 if not global.energy_samples then
     global.energy_samples = {}
@@ -147,6 +169,9 @@ global.utils.register_for_sampling = function(entity)
     elseif entity.type == "solar-panel" then
         props["electric_output_flow_limit"] = entity.electric_output_flow_limit or 0
     end
+    -- All entity types get is_working tracking (utilization)
+    local initial_working = (entity.status and WORKING_STATUS_SET[entity.status]) and 1 or 0
+    props["is_working"] = initial_working
     if entity.type == "pipe" or entity.type == "pipe-to-ground" then
         local flow = 0
         if entity.fluidbox and #entity.fluidbox > 0 then
@@ -198,6 +223,17 @@ global.utils.get_sample_avg = function(entity, property)
     return sums[property] / WINDOW_SIZE
 end
 
+--- Update the is_working property for one entity in the ring buffer.
+--- Called from each entity-type loop in the tick handler.
+local function update_is_working(entity, uid, cursor)
+    local s = global.energy_samples[uid]
+    if not s or not s["is_working"] then return end
+    local new = (entity.status and WORKING_STATUS_SET[entity.status]) and 1 or 0
+    local old = s["is_working"][cursor] or 0
+    s["is_working"][cursor] = new
+    global.sample_running_sums[uid]["is_working"] = (global.sample_running_sums[uid]["is_working"] or 0) - old + new
+end
+
 --- The tick handler: sample all registered entities.
 --- Uses script.on_nth_tick(1, ...) which is independent of
 --- script.on_event(defines.events.on_tick, ...) used by alerts.lua and utils.lua.
@@ -227,6 +263,7 @@ script.on_nth_tick(1, function(event)
                 s["energy"][cursor] = new
                 global.sample_running_sums[uid]["energy"] = (global.sample_running_sums[uid]["energy"] or 0) - old + new
             end
+            update_is_working(entity, uid, cursor)
         end
     end
 
@@ -244,6 +281,7 @@ script.on_nth_tick(1, function(event)
                 s["energy_generated_last_tick"][cursor] = new
                 global.sample_running_sums[uid]["energy_generated_last_tick"] = (global.sample_running_sums[uid]["energy_generated_last_tick"] or 0) - old + new
             end
+            update_is_working(entity, uid, cursor)
         end
     end
 
@@ -261,6 +299,7 @@ script.on_nth_tick(1, function(event)
                 s["electric_output_flow_limit"][cursor] = new
                 global.sample_running_sums[uid]["electric_output_flow_limit"] = (global.sample_running_sums[uid]["electric_output_flow_limit"] or 0) - old + new
             end
+            update_is_working(entity, uid, cursor)
         end
     end
 
@@ -296,6 +335,7 @@ script.on_nth_tick(1, function(event)
                 s["transfer_count"][cursor] = items_this_tick
                 global.sample_running_sums[uid]["transfer_count"] = (global.sample_running_sums[uid]["transfer_count"] or 0) - old + items_this_tick
             end
+            update_is_working(entity, uid, cursor)
         end
     end
 
@@ -324,6 +364,7 @@ script.on_nth_tick(1, function(event)
                 s["mining_output_count"][cursor] = items_this_tick
                 global.sample_running_sums[uid]["mining_output_count"] = (global.sample_running_sums[uid]["mining_output_count"] or 0) - old + items_this_tick
             end
+            update_is_working(entity, uid, cursor)
         end
     end
 
@@ -341,6 +382,21 @@ script.on_nth_tick(1, function(event)
                 local old = s["fluidbox_flow_1"][cursor] or 0
                 s["fluidbox_flow_1"][cursor] = flow
                 global.sample_running_sums[uid]["fluidbox_flow_1"] = (global.sample_running_sums[uid]["fluidbox_flow_1"] or 0) - old + flow
+            end
+            -- Note: pipes don't get is_working — they don't have a meaningful status
+        end
+    end
+
+    -- Sample crafting entities (assembling machines, furnaces, labs, etc.) for utilization only.
+    -- These entity types don't have a type-specific metric sampled above, so we only track is_working.
+    for _, etype in ipairs(CRAFTING_ENTITY_TYPES) do
+        for _, entity in pairs(surface.find_entities_filtered{type=etype, force="player"}) do
+            if entity.valid and entity.unit_number then
+                local uid = entity.unit_number
+                if not global.energy_samples[uid] then
+                    global.utils.register_for_sampling(entity)
+                end
+                update_is_working(entity, uid, cursor)
             end
         end
     end

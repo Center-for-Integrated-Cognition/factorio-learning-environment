@@ -568,6 +568,120 @@ local function is_valid_connection_point(surface, position)
     return not invalid_tiles[tile.name]
 end
 
+-- Rebuild belt group assignments by BFS-walking all belt entities on the surface.
+-- Assigns stable, monotonically increasing IDs that persist across calls.
+-- IDs are sticky: unchanged groups keep the same ID. Merged groups keep the
+-- lowest existing ID. Split groups: one fragment keeps the original, others get
+-- new IDs. New belts get a fresh ID from the counter.
+global.utils.rebuild_belt_groups = function(surface)
+    -- Lazily initialise globals (safe for saves created before this code existed)
+    if not global.belt_group_map then global.belt_group_map = {} end
+    if not global.next_belt_group_id then global.next_belt_group_id = 1 end
+
+    local belt_types = {["transport-belt"]=true, ["underground-belt"]=true, ["splitter"]=true}
+
+    -- 1. Gather every belt entity on the surface
+    local all_belts = surface.find_entities_filtered{
+        type = {"transport-belt", "underground-belt", "splitter"}
+    }
+
+    -- Index by unit_number for O(1) lookup
+    local entity_by_unit = {}
+    for _, ent in ipairs(all_belts) do
+        entity_by_unit[ent.unit_number] = ent
+    end
+
+    -- 2. BFS to discover connected components
+    local visited = {}          -- unit_number -> true
+    local components = {}       -- list of {unit_number, ...}
+
+    for _, ent in ipairs(all_belts) do
+        if not visited[ent.unit_number] then
+            -- BFS from this entity
+            local component = {}
+            local queue = {ent}
+            local head = 1
+            while head <= #queue do
+                local current = queue[head]
+                head = head + 1
+                local uid = current.unit_number
+                if not visited[uid] then
+                    visited[uid] = true
+                    component[#component + 1] = uid
+
+                    -- Walk belt_neighbours (inputs and outputs)
+                    local bn = current.belt_neighbours
+                    if bn then
+                        for _, neighbour in ipairs(bn["inputs"] or {}) do
+                            if not visited[neighbour.unit_number] then
+                                queue[#queue + 1] = neighbour
+                            end
+                        end
+                        for _, neighbour in ipairs(bn["outputs"] or {}) do
+                            if not visited[neighbour.unit_number] then
+                                queue[#queue + 1] = neighbour
+                            end
+                        end
+                    end
+
+                    -- Underground belt: also follow the paired entity
+                    if current.type == "underground-belt" and current.neighbours then
+                        local pair = current.neighbours
+                        -- neighbours for underground belt is the single paired entity (or nil)
+                        if pair and pair.valid and not visited[pair.unit_number] then
+                            queue[#queue + 1] = pair
+                        end
+                    end
+                end
+            end
+            components[#components + 1] = component
+        end
+    end
+
+    -- 3. Reconcile each component with existing assignments
+    local new_map = {}  -- replacement for global.belt_group_map
+
+    for _, component in ipairs(components) do
+        -- Collect all existing group IDs held by members of this component
+        local existing_ids = {}
+        local seen_ids = {}
+        for _, uid in ipairs(component) do
+            local old_id = global.belt_group_map[uid]
+            if old_id and not seen_ids[old_id] then
+                seen_ids[old_id] = true
+                existing_ids[#existing_ids + 1] = old_id
+            end
+        end
+
+        local chosen_id
+        if #existing_ids == 0 then
+            -- All members are new -> assign a fresh ID
+            chosen_id = global.next_belt_group_id
+            global.next_belt_group_id = global.next_belt_group_id + 1
+        elseif #existing_ids == 1 then
+            -- Unchanged or grown group -> keep existing ID
+            chosen_id = existing_ids[1]
+        else
+            -- Merge: pick the lowest existing ID
+            chosen_id = existing_ids[1]
+            for j = 2, #existing_ids do
+                if existing_ids[j] < chosen_id then
+                    chosen_id = existing_ids[j]
+                end
+            end
+            -- Other IDs are implicitly retired (counter never reused)
+        end
+
+        -- Assign chosen_id to every member
+        for _, uid in ipairs(component) do
+            new_map[uid] = chosen_id
+        end
+    end
+
+    -- 4. Replace the map (removed entities automatically drop out)
+    global.belt_group_map = new_map
+end
+
 global.utils.entity_status_names = function(entity_status)
     local s = entity_status
     if not s then return '"normal"' end
@@ -804,6 +918,14 @@ global.utils.serialize_entity = function(entity)
                 serialized.connected_to = entity.neighbours.unit_number
             end
         end
+
+        -- Stable belt group ID (set by rebuild_belt_groups, O(1) lookup)
+        serialized.belt_group_id = global.belt_group_map[entity.unit_number] or 0
+    end
+
+    -- Splitters also get a belt_group_id
+    if entity.type == "splitter" then
+        serialized.belt_group_id = global.belt_group_map[entity.unit_number] or 0
     end
 
     serialized.id = entity.unit_number
@@ -1443,6 +1565,15 @@ global.utils.serialize_entity = function(entity)
             if eesp.drain then
                 serialized.electric_drain = eesp.drain
             end
+        end
+    end
+
+    -- Utilization: fraction of time the entity was in a working status (0.0-1.0).
+    -- Only meaningful for entities the sampler tracks (pipes/poles excluded).
+    if entity.unit_number and global.sampled_entities and global.sampled_entities[entity.unit_number] then
+        local util = global.utils.get_sample_avg(entity, "is_working")
+        if util and util > 0 then
+            serialized.utilization = util
         end
     end
 
