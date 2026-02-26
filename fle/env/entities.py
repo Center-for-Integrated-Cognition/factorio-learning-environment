@@ -985,6 +985,7 @@ class ElectricityGroup(EntityGroup):
 
     name: str = "electricity-group"
     poles: List[ElectricityPole]
+    power_switches: list = []
 
     def __repr__(self) -> str:
         positions = [f"(x={p.position.x},y={p.position.y})" for p in self.poles]

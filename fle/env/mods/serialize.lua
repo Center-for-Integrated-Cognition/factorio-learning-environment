@@ -945,6 +945,110 @@ global.utils.serialize_entity = function(entity)
         serialized.flow_rate = flow_per_tick * 60
     end
 
+    -- Power switch: serialize state and which poles are connected on each side
+    if entity.type == "power-switch" then
+        serialized.power_switch_state = entity.power_switch_state
+
+        -- Strategy: use copper_connection_definitions to read both sides.
+        -- Each CopperConnectionDefinition has:
+        --   source_wire_connector: defines.wire_connection_id (left / right side of switch)
+        --   target_entity: LuaEntity (the connected pole)
+        --   target_wire_connector: defines.wire_connection_id
+        -- We key side_map by the actual source_wire_connector value (may NOT be 1/2).
+        local side_map = {}
+        local conns = entity.copper_connection_definitions
+        if conns then
+            for _, conn in ipairs(conns) do
+                local side_key = conn.source_wire_connector
+                local pole = conn.target_entity
+                if not side_map[side_key] then
+                    side_map[side_key] = { pole_ids = {}, network_id = nil }
+                end
+                if pole.valid then
+                    if pole.unit_number then
+                        table.insert(side_map[side_key].pole_ids, pole.unit_number)
+                    end
+                    if not side_map[side_key].network_id and pole.electric_network_id then
+                        side_map[side_key].network_id = pole.electric_network_id
+                    end
+                end
+            end
+        end
+
+        -- Build switch_sides from ALL keys in side_map (sorted for determinism)
+        local switch_sides = {}
+        local side_keys = {}
+        for k, _ in pairs(side_map) do
+            table.insert(side_keys, k)
+        end
+        table.sort(side_keys)
+        for _, k in ipairs(side_keys) do
+            table.insert(switch_sides, side_map[k])
+        end
+
+        -- Fallback: if copper_connection_definitions gave < 2 sides, try neighbours.
+        -- For power-switch entities, neighbours returns {copper = {LuaEntity, ...}}
+        -- listing poles connected on either side. We group them by electric_network_id.
+        if #switch_sides < 2 then
+            local neighbours = entity.neighbours
+            if neighbours then
+                local poles_to_check = {}
+                if type(neighbours) == "table" then
+                    if neighbours.copper then
+                        for _, p in ipairs(neighbours.copper) do
+                            table.insert(poles_to_check, p)
+                        end
+                    else
+                        -- neighbours might be indexed arrays: [1]={...}, [2]={...}
+                        for _, v in pairs(neighbours) do
+                            if type(v) == "table" then
+                                -- v might be a single entity or an array
+                                if v.valid then
+                                    table.insert(poles_to_check, v)
+                                else
+                                    for _, p in ipairs(v) do
+                                        if type(p) == "table" and p.valid then
+                                            table.insert(poles_to_check, p)
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+
+                if #poles_to_check > 0 then
+                    -- Group by electric_network_id
+                    local network_poles = {}
+                    for _, pole in ipairs(poles_to_check) do
+                        if pole.valid and pole.electric_network_id then
+                            local nid = pole.electric_network_id
+                            if not network_poles[nid] then
+                                network_poles[nid] = { pole_ids = {}, network_id = nid }
+                            end
+                            if pole.unit_number then
+                                table.insert(network_poles[nid].pole_ids, pole.unit_number)
+                            end
+                        end
+                    end
+
+                    -- Rebuild switch_sides from grouped poles
+                    switch_sides = {}
+                    local net_keys = {}
+                    for k, _ in pairs(network_poles) do
+                        table.insert(net_keys, k)
+                    end
+                    table.sort(net_keys)
+                    for _, k in ipairs(net_keys) do
+                        table.insert(switch_sides, network_poles[k])
+                    end
+                end
+            end
+        end
+
+        serialized.switch_sides = switch_sides
+    end
+
     -- Add input and output positions if the entity is a splitter
     if entity.type == "splitter" then
         -- Initialize positions based on entity center

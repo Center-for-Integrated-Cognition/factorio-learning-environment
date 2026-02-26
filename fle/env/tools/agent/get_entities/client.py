@@ -84,6 +84,10 @@ class GetEntities(Tool):
                         Prototype.Substation,
                     }
                     expanded_entities.update(pole_types)
+                    # Power switches are fetched so their switch_sides data can
+                    # be used to merge electricity groups, but they are not
+                    # returned as standalone entities.
+                    internal_entities.add(Prototype.PowerSwitch)
                     group_requests.add(Prototype.ElectricityGroup)
                 else:
                     expanded_entities.add(entity)
@@ -161,7 +165,8 @@ class GetEntities(Tool):
 
                 # remove all empty values from the entity_data dictionary
                 entity_data = {
-                    k: v for k, v in entity_data.items() if v or isinstance(v, int)
+                    k: v for k, v in entity_data.items()
+                    if v or isinstance(v, int)
                 }
 
                 try:
@@ -407,7 +412,12 @@ class GetEntities(Tool):
                         Prototype.Substation,
                     )
                 ]
-                group = agglomerate_groupable_entities(poles)
+                power_switches = [
+                    entity
+                    for entity in entities_list
+                    if hasattr(entity, "name") and entity.name == "power-switch"
+                ]
+                group = agglomerate_groupable_entities(poles, power_switches=power_switches)
                 [entities_list.remove(pole) for pole in poles]
                 entities_list.extend(group)
 
