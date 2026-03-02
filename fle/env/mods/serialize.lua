@@ -1657,11 +1657,13 @@ global.utils.serialize_entity = function(entity)
         serialized.electrical_id = entity.electric_network_id
     end
 
-    -- Universal electric energy source data for all electric consumers/producers.
-    -- Ensures max_energy_usage and drain are available on every entity type,
+    -- Universal electric energy source data for electric consumers/producers.
+    -- Ensures max_energy_usage and drain are available on electric entity types,
     -- not just the ones that had it added per-type (inserter, boiler, accumulator).
+    -- Guard: max_energy_usage > 0 filters out non-electric entities (belts, pipes,
+    -- power switches, constant combinators) where the runtime returns 0.
     if entity.prototype then
-        if entity.prototype.max_energy_usage and not serialized.max_energy_usage then
+        if entity.prototype.max_energy_usage and entity.prototype.max_energy_usage > 0 and not serialized.max_energy_usage then
             serialized.max_energy_usage = entity.prototype.max_energy_usage
         end
         local eesp = entity.prototype.electric_energy_source_prototype
@@ -1676,7 +1678,7 @@ global.utils.serialize_entity = function(entity)
     -- Only meaningful for entities the sampler tracks (pipes/poles excluded).
     if entity.unit_number and global.sampled_entities and global.sampled_entities[entity.unit_number] then
         local util = global.utils.get_sample_avg(entity, "is_working")
-        if util and util > 0 then
+        if util then
             serialized.utilization = util
         end
     end
