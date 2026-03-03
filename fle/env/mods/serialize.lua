@@ -1334,16 +1334,20 @@ global.utils.serialize_entity = function(entity)
         local fluid_box = entity.fluidbox
         if fluid_box and #fluid_box > 0 then
             serialized.fluid_box = {}
-            serialized.fluidbox_flows = {}  -- Array of flow rates per fluidbox slot
+            serialized.fluidbox_flows = {}  -- Array of rolling-average flow rates per fluidbox slot
             local all_system_ids = {}
+            -- Ensure the entity is registered in the sampler so we get
+            -- averaged readings rather than raw instantaneous get_flow().
+            -- (Instantaneous values are often 0 for batch-processing entities
+            -- like oil-refineries and chemical-plants.)
+            global.utils.register_for_sampling(entity)
             for i = 1, #fluid_box do
-                -- game.print("Fluid!")
                 local fluid = fluid_box[i]
                 if fluid then
                     table.insert(serialized.fluid_box, {name = "\""..fluid.name.."\"", amount = fluid.amount, temperature = fluid.temperature})
                 end
-                -- Always add flow rate for this slot (even if 0)
-                table.insert(serialized.fluidbox_flows, fluid_box.get_flow(i) or 0)
+                local flow_avg = global.utils.get_sample_avg(entity, "fluidbox_flow_" .. i)
+                table.insert(serialized.fluidbox_flows, flow_avg)
                 -- Collect fluid system IDs for grouping
                 local system_id = fluid_box.get_fluid_system_id(i)
                 if system_id then

@@ -1,8 +1,8 @@
 --- sampler.lua
 --- Tick-level ring buffer sampler for entity properties.
---- Provides 5-second (300 tick) rolling averages to match the shortest
---- precision available in Factorio 1.1 (defines.flow_precision_index.five_seconds),
---- which is also what the electric network chart shows by default.
+--- Provides a 10-second (600 tick) rolling average — long enough to cover
+--- at least 2 full crafting cycles of the slowest fluid-processing recipes
+--- (e.g. advanced oil processing at 5 seconds per craft).
 ---
 --- ARCHITECTURE:
 ---   - Registers script.on_nth_tick(1, ...) to sample every tick.
@@ -14,7 +14,7 @@
 --- PROPERTIES SAMPLED (only those currently serialized that are instantaneous):
 ---   - "energy"                    : entity.energy (accumulator buffer fill, J)
 ---   - "energy_generated_last_tick": entity.energy_generated_last_tick (generator, J/tick)
----   - "fluidbox_flow_1"          : entity.fluidbox.get_flow(1) (pipe/pipe-to-ground, units/tick)
+---   - "fluidbox_flow_N"          : entity.fluidbox.get_flow(N) (all fluidbox slots, units/tick)
 ---   - "electric_output_flow_limit": entity.electric_output_flow_limit (solar panel, J/tick)
 ---
 --- NOTE: electric pole flow_rate uses Factorio's built-in get_flow_count()
@@ -96,7 +96,7 @@
 ---      currently dumps entity tables (via dump() in serialize.lua).
 --- ============================================================================
 
-local WINDOW_SIZE = 300  -- 5 seconds at 60 UPS
+local WINDOW_SIZE = 600  -- 10 seconds at 60 UPS (covers 2 full oil-refinery cycles)
 
 -- Initialize global storage if not present
 if not global.energy_samples then
@@ -130,12 +130,16 @@ global.utils.register_for_sampling = function(entity)
     elseif entity.type == "solar-panel" then
         props["electric_output_flow_limit"] = entity.electric_output_flow_limit or 0
     end
-    if entity.type == "pipe" or entity.type == "pipe-to-ground" then
-        local flow = 0
-        if entity.fluidbox and #entity.fluidbox > 0 then
-            pcall(function() flow = entity.fluidbox.get_flow(1) end)
+    -- Register all fluidbox slots for any entity with a fluidbox.
+    -- This covers pipes (single slot), assembling-machines (oil-refinery,
+    -- chemical-plant), mining-drills (pumpjack), boilers, generators, etc.
+    if entity.fluidbox and #entity.fluidbox > 0 then
+        for i = 1, #entity.fluidbox do
+            local prop = "fluidbox_flow_" .. i
+            local flow = 0
+            pcall(function() flow = entity.fluidbox.get_flow(i) end)
+            props[prop] = flow
         end
-        props["fluidbox_flow_1"] = flow
     end
 
     for prop, val in pairs(props) do
@@ -177,9 +181,9 @@ end
 --- Uses script.on_nth_tick(1, ...) which is independent of
 --- script.on_event(defines.events.on_tick, ...) used by alerts.lua and utils.lua.
 ---
---- Finds entities by type using find_entities_filtered. This is limited to
---- only the entity types we need (accumulators, generators, solar panels,
---- pipes) — typically a small set in any given base.
+--- Finds entities by type using find_entities_filtered for each category:
+--- accumulators, generators, solar panels, pipes, and fluid-processing
+--- buildings (assembling-machines, mining-drills, boilers, etc.).
 script.on_nth_tick(1, function(event)
     -- Advance the ring buffer cursor (1-indexed, wraps around WINDOW_SIZE)
     global.sample_cursor = (global.sample_cursor % WINDOW_SIZE) + 1
@@ -230,7 +234,10 @@ script.on_nth_tick(1, function(event)
         end
     end
 
-    -- Sample pipes and pipe-to-ground
+    -- Sample all entities with fluidboxes.
+    -- Pipes are the most common and always have exactly one slot, so we
+    -- handle them with a direct property write (no inner loop) for speed.
+    -- All other fluid-processing entity types use a generic N-slot loop.
     for _, entity in pairs(surface.find_entities_filtered{type={"pipe", "pipe-to-ground"}, force="player"}) do
         if entity.valid and entity.unit_number and entity.fluidbox and #entity.fluidbox > 0 then
             local uid = entity.unit_number
@@ -242,6 +249,32 @@ script.on_nth_tick(1, function(event)
                 local flow = 0
                 pcall(function() flow = entity.fluidbox.get_flow(1) end)
                 s["fluidbox_flow_1"][cursor] = flow
+            end
+        end
+    end
+
+    -- Fluid-processing buildings: assembling-machine (oil-refinery,
+    -- chemical-plant), mining-drill (pumpjack), boiler, generator, etc.
+    local fluid_entity_types = {
+        "assembling-machine", "mining-drill", "boiler", "generator",
+        "offshore-pump", "storage-tank", "furnace"
+    }
+    for _, entity in pairs(surface.find_entities_filtered{type=fluid_entity_types, force="player"}) do
+        if entity.valid and entity.unit_number and entity.fluidbox and #entity.fluidbox > 0 then
+            local uid = entity.unit_number
+            if not global.energy_samples[uid] then
+                global.utils.register_for_sampling(entity)
+            end
+            local s = global.energy_samples[uid]
+            if s then
+                for i = 1, #entity.fluidbox do
+                    local prop = "fluidbox_flow_" .. i
+                    if s[prop] then
+                        local flow = 0
+                        pcall(function() flow = entity.fluidbox.get_flow(i) end)
+                        s[prop][cursor] = flow
+                    end
+                end
             end
         end
     end
