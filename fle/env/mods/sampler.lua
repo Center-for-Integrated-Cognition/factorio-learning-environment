@@ -183,12 +183,6 @@ global.utils.register_for_sampling = function(entity)
     -- All entity types get is_working tracking (utilization)
     local initial_working = (entity.status and WORKING_STATUS_SET[entity.status]) and 1 or 0
     props["is_working"] = initial_working
-    if entity.type == "pipe" or entity.type == "pipe-to-ground" then
-        local flow = 0
-        if entity.fluidbox and #entity.fluidbox > 0 then
-            pcall(function() flow = entity.fluidbox.get_flow(1) end)
-        end
-    end
     if entity.type == "inserter" then
         props["transfer_count"] = 0
         -- Initialize previous held_stack state
@@ -433,7 +427,9 @@ script.on_nth_tick(1, function(event)
                     if s[prop] then
                         local flow = 0
                         pcall(function() flow = entity.fluidbox.get_flow(i) end)
+                        local old = s[prop][cursor] or 0
                         s[prop][cursor] = flow
+                        global.sample_running_sums[uid][prop] = (global.sample_running_sums[uid][prop] or 0) - old + flow
                     end
                 end
             end
