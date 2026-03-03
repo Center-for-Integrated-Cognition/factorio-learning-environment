@@ -62,6 +62,17 @@ if not global.goal then
     global.goal = nil
 end
 
+-- Belt group stable ID tracking
+if not global.belt_group_map then
+    --- @type table<number, number> Maps entity unit_number -> belt_group_id
+    global.belt_group_map = {}
+end
+
+if not global.next_belt_group_id then
+    --- @type number Monotonically increasing counter for belt group IDs (never decremented)
+    global.next_belt_group_id = 1
+end
+
 -- Initialize debug flags
 if global.debug == nil then
     global.debug = {

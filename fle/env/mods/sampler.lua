@@ -16,6 +16,9 @@
 ---   - "energy_generated_last_tick": entity.energy_generated_last_tick (generator, J/tick)
 ---   - "fluidbox_flow_N"          : entity.fluidbox.get_flow(N) (all fluidbox slots, units/tick)
 ---   - "electric_output_flow_limit": entity.electric_output_flow_limit (solar panel, J/tick)
+---   - "transfer_count"             : inserter held_stack transitions (items/tick)
+---   - "is_working"                : 1 if entity.status is a working status, 0 otherwise
+---                                    (rolling avg = utilization ratio 0.0-1.0)
 ---
 --- NOTE: electric pole flow_rate uses Factorio's built-in get_flow_count()
 ---   averaging, NOT this sampler. Both use a 5-second window.
@@ -98,6 +101,26 @@
 
 local WINDOW_SIZE = 600  -- 10 seconds at 60 UPS (covers 2 full oil-refinery cycles)
 
+-- Statuses that count as "working" (actively carrying out a process) for utilization tracking.
+-- Checked via numeric comparison against defines.entity_status values.
+local WORKING_STATUS_SET = {}
+if defines and defines.entity_status then
+    for _, key in ipairs({"working", "normal", "low_power", "charging", "discharging",
+                          "launching_rocket", "preparing_rocket_for_launch",
+                          "waiting_to_launch_rocket", "low_input_fluid"}) do
+        if defines.entity_status[key] ~= nil then
+            WORKING_STATUS_SET[defines.entity_status[key]] = true
+        end
+    end
+end
+
+-- Entity types that should have is_working tracked but are not already iterated
+-- by other sampler loops (accumulators, generators, solar panels, inserters, drills, pipes).
+local CRAFTING_ENTITY_TYPES = {
+    "assembling-machine", "furnace", "lab", "rocket-silo",
+    "reactor", "beacon", "boiler"
+}
+
 -- Initialize global storage if not present
 if not global.energy_samples then
     global.energy_samples = {}
@@ -108,6 +131,22 @@ end
 if not global.sampled_entities then
     -- Set of unit_numbers we are actively sampling
     global.sampled_entities = {}
+end
+if not global.sample_running_sums then
+    -- O(1) running sums: global.sample_running_sums[unit_number][property] = sum
+    global.sample_running_sums = {}
+end
+if not global.inserter_prev_held then
+    -- Previous tick's held_stack state per inserter: {name=string, count=number} or nil
+    global.inserter_prev_held = {}
+end
+if not global.inserter_last_item then
+    -- Name of the last item type transferred by each inserter
+    global.inserter_last_item = {}
+end
+if not global.drill_prev_progress then
+    -- Previous tick's mining_progress per mining drill (float 0..1)
+    global.drill_prev_progress = {}
 end
 
 --- Register an entity for sampling. Called lazily the first time
@@ -141,12 +180,38 @@ global.utils.register_for_sampling = function(entity)
             props[prop] = flow
         end
     end
+    -- All entity types get is_working tracking (utilization)
+    local initial_working = (entity.status and WORKING_STATUS_SET[entity.status]) and 1 or 0
+    props["is_working"] = initial_working
+    if entity.type == "pipe" or entity.type == "pipe-to-ground" then
+        local flow = 0
+        if entity.fluidbox and #entity.fluidbox > 0 then
+            pcall(function() flow = entity.fluidbox.get_flow(1) end)
+        end
+    end
+    if entity.type == "inserter" then
+        props["transfer_count"] = 0
+        -- Initialize previous held_stack state
+        local held = entity.held_stack
+        if held and held.valid_for_read then
+            global.inserter_prev_held[uid] = {name = held.name, count = held.count}
+        else
+            global.inserter_prev_held[uid] = nil
+        end
+    end
+    if entity.type == "mining-drill" then
+        props["mining_output_count"] = 0
+        -- Initialize previous mining_progress
+        global.drill_prev_progress[uid] = entity.mining_progress or 0
+    end
 
+    global.sample_running_sums[uid] = {}
     for prop, val in pairs(props) do
         global.energy_samples[uid][prop] = {}
         for i = 1, WINDOW_SIZE do
             global.energy_samples[uid][prop][i] = val
         end
+        global.sample_running_sums[uid][prop] = val * WINDOW_SIZE
     end
 end
 
@@ -162,19 +227,21 @@ global.utils.get_sample_avg = function(entity, property)
         global.utils.register_for_sampling(entity)
     end
 
-    local buf = global.energy_samples[uid] and global.energy_samples[uid][property]
-    if not buf then return 0 end
+    local sums = global.sample_running_sums[uid]
+    if not sums or not sums[property] then return 0 end
 
-    local sum = 0
-    local count = 0
-    for i = 1, WINDOW_SIZE do
-        if buf[i] then
-            sum = sum + buf[i]
-            count = count + 1
-        end
-    end
-    if count == 0 then return 0 end
-    return sum / count
+    return sums[property] / WINDOW_SIZE
+end
+
+--- Update the is_working property for one entity in the ring buffer.
+--- Called from each entity-type loop in the tick handler.
+local function update_is_working(entity, uid, cursor)
+    local s = global.energy_samples[uid]
+    if not s or not s["is_working"] then return end
+    local new = (entity.status and WORKING_STATUS_SET[entity.status]) and 1 or 0
+    local old = s["is_working"][cursor] or 0
+    s["is_working"][cursor] = new
+    global.sample_running_sums[uid]["is_working"] = (global.sample_running_sums[uid]["is_working"] or 0) - old + new
 end
 
 --- The tick handler: sample all registered entities.
@@ -201,8 +268,12 @@ script.on_nth_tick(1, function(event)
             end
             local s = global.energy_samples[uid]
             if s and s["energy"] then
-                s["energy"][cursor] = entity.energy or 0
+                local old = s["energy"][cursor] or 0
+                local new = entity.energy or 0
+                s["energy"][cursor] = new
+                global.sample_running_sums[uid]["energy"] = (global.sample_running_sums[uid]["energy"] or 0) - old + new
             end
+            update_is_working(entity, uid, cursor)
         end
     end
 
@@ -215,8 +286,12 @@ script.on_nth_tick(1, function(event)
             end
             local s = global.energy_samples[uid]
             if s and s["energy_generated_last_tick"] then
-                s["energy_generated_last_tick"][cursor] = entity.energy_generated_last_tick or 0
+                local old = s["energy_generated_last_tick"][cursor] or 0
+                local new = entity.energy_generated_last_tick or 0
+                s["energy_generated_last_tick"][cursor] = new
+                global.sample_running_sums[uid]["energy_generated_last_tick"] = (global.sample_running_sums[uid]["energy_generated_last_tick"] or 0) - old + new
             end
+            update_is_working(entity, uid, cursor)
         end
     end
 
@@ -229,8 +304,77 @@ script.on_nth_tick(1, function(event)
             end
             local s = global.energy_samples[uid]
             if s and s["electric_output_flow_limit"] then
-                s["electric_output_flow_limit"][cursor] = entity.electric_output_flow_limit or 0
+                local old = s["electric_output_flow_limit"][cursor] or 0
+                local new = entity.electric_output_flow_limit or 0
+                s["electric_output_flow_limit"][cursor] = new
+                global.sample_running_sums[uid]["electric_output_flow_limit"] = (global.sample_running_sums[uid]["electric_output_flow_limit"] or 0) - old + new
             end
+            update_is_working(entity, uid, cursor)
+        end
+    end
+
+    -- Sample inserters: detect held_stack transitions (item held → empty = completed transfer)
+    for _, entity in pairs(surface.find_entities_filtered{type="inserter", force="player"}) do
+        if entity.valid and entity.unit_number then
+            local uid = entity.unit_number
+            if not global.energy_samples[uid] then
+                global.utils.register_for_sampling(entity)
+            end
+            local s = global.energy_samples[uid]
+            if s and s["transfer_count"] then
+                local held = entity.held_stack
+                local currently_holding = held and held.valid_for_read
+                local prev = global.inserter_prev_held[uid]
+
+                local items_this_tick = 0
+                if prev and not currently_holding then
+                    -- Transition: was holding → now empty = transfer completed
+                    items_this_tick = prev.count or 1
+                    global.inserter_last_item[uid] = prev.name
+                end
+
+                -- Update previous state
+                if currently_holding then
+                    global.inserter_prev_held[uid] = {name = held.name, count = held.count}
+                else
+                    global.inserter_prev_held[uid] = nil
+                end
+
+                -- Write to ring buffer with O(1) running sum update
+                local old = s["transfer_count"][cursor] or 0
+                s["transfer_count"][cursor] = items_this_tick
+                global.sample_running_sums[uid]["transfer_count"] = (global.sample_running_sums[uid]["transfer_count"] or 0) - old + items_this_tick
+            end
+            update_is_working(entity, uid, cursor)
+        end
+    end
+
+    -- Sample mining drills: detect mining_progress wrap-arounds (cycle completion)
+    for _, entity in pairs(surface.find_entities_filtered{type="mining-drill", force="player"}) do
+        if entity.valid and entity.unit_number then
+            local uid = entity.unit_number
+            if not global.energy_samples[uid] then
+                global.utils.register_for_sampling(entity)
+            end
+            local s = global.energy_samples[uid]
+            if s and s["mining_output_count"] then
+                local current_progress = entity.mining_progress or 0
+                local prev_progress = global.drill_prev_progress[uid]
+
+                local items_this_tick = 0
+                if prev_progress and prev_progress > 0.5 and current_progress < 0.1 then
+                    -- mining_progress wrapped from near-1 to near-0: one mining cycle completed
+                    items_this_tick = 1
+                end
+
+                global.drill_prev_progress[uid] = current_progress
+
+                -- Write to ring buffer with O(1) running sum update
+                local old = s["mining_output_count"][cursor] or 0
+                s["mining_output_count"][cursor] = items_this_tick
+                global.sample_running_sums[uid]["mining_output_count"] = (global.sample_running_sums[uid]["mining_output_count"] or 0) - old + items_this_tick
+            end
+            update_is_working(entity, uid, cursor)
         end
     end
 
@@ -248,7 +392,24 @@ script.on_nth_tick(1, function(event)
             if s and s["fluidbox_flow_1"] then
                 local flow = 0
                 pcall(function() flow = entity.fluidbox.get_flow(1) end)
+                local old = s["fluidbox_flow_1"][cursor] or 0
                 s["fluidbox_flow_1"][cursor] = flow
+                global.sample_running_sums[uid]["fluidbox_flow_1"] = (global.sample_running_sums[uid]["fluidbox_flow_1"] or 0) - old + flow
+            end
+            -- Note: pipes don't get is_working — they don't have a meaningful status
+        end
+    end
+
+    -- Sample crafting entities (assembling machines, furnaces, labs, etc.) for utilization only.
+    -- These entity types don't have a type-specific metric sampled above, so we only track is_working.
+    for _, etype in ipairs(CRAFTING_ENTITY_TYPES) do
+        for _, entity in pairs(surface.find_entities_filtered{type=etype, force="player"}) do
+            if entity.valid and entity.unit_number then
+                local uid = entity.unit_number
+                if not global.energy_samples[uid] then
+                    global.utils.register_for_sampling(entity)
+                end
+                update_is_working(entity, uid, cursor)
             end
         end
     end

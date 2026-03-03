@@ -568,6 +568,120 @@ local function is_valid_connection_point(surface, position)
     return not invalid_tiles[tile.name]
 end
 
+-- Rebuild belt group assignments by BFS-walking all belt entities on the surface.
+-- Assigns stable, monotonically increasing IDs that persist across calls.
+-- IDs are sticky: unchanged groups keep the same ID. Merged groups keep the
+-- lowest existing ID. Split groups: one fragment keeps the original, others get
+-- new IDs. New belts get a fresh ID from the counter.
+global.utils.rebuild_belt_groups = function(surface)
+    -- Lazily initialise globals (safe for saves created before this code existed)
+    if not global.belt_group_map then global.belt_group_map = {} end
+    if not global.next_belt_group_id then global.next_belt_group_id = 1 end
+
+    local belt_types = {["transport-belt"]=true, ["underground-belt"]=true, ["splitter"]=true}
+
+    -- 1. Gather every belt entity on the surface
+    local all_belts = surface.find_entities_filtered{
+        type = {"transport-belt", "underground-belt", "splitter"}
+    }
+
+    -- Index by unit_number for O(1) lookup
+    local entity_by_unit = {}
+    for _, ent in ipairs(all_belts) do
+        entity_by_unit[ent.unit_number] = ent
+    end
+
+    -- 2. BFS to discover connected components
+    local visited = {}          -- unit_number -> true
+    local components = {}       -- list of {unit_number, ...}
+
+    for _, ent in ipairs(all_belts) do
+        if not visited[ent.unit_number] then
+            -- BFS from this entity
+            local component = {}
+            local queue = {ent}
+            local head = 1
+            while head <= #queue do
+                local current = queue[head]
+                head = head + 1
+                local uid = current.unit_number
+                if not visited[uid] then
+                    visited[uid] = true
+                    component[#component + 1] = uid
+
+                    -- Walk belt_neighbours (inputs and outputs)
+                    local bn = current.belt_neighbours
+                    if bn then
+                        for _, neighbour in ipairs(bn["inputs"] or {}) do
+                            if not visited[neighbour.unit_number] then
+                                queue[#queue + 1] = neighbour
+                            end
+                        end
+                        for _, neighbour in ipairs(bn["outputs"] or {}) do
+                            if not visited[neighbour.unit_number] then
+                                queue[#queue + 1] = neighbour
+                            end
+                        end
+                    end
+
+                    -- Underground belt: also follow the paired entity
+                    if current.type == "underground-belt" and current.neighbours then
+                        local pair = current.neighbours
+                        -- neighbours for underground belt is the single paired entity (or nil)
+                        if pair and pair.valid and not visited[pair.unit_number] then
+                            queue[#queue + 1] = pair
+                        end
+                    end
+                end
+            end
+            components[#components + 1] = component
+        end
+    end
+
+    -- 3. Reconcile each component with existing assignments
+    local new_map = {}  -- replacement for global.belt_group_map
+
+    for _, component in ipairs(components) do
+        -- Collect all existing group IDs held by members of this component
+        local existing_ids = {}
+        local seen_ids = {}
+        for _, uid in ipairs(component) do
+            local old_id = global.belt_group_map[uid]
+            if old_id and not seen_ids[old_id] then
+                seen_ids[old_id] = true
+                existing_ids[#existing_ids + 1] = old_id
+            end
+        end
+
+        local chosen_id
+        if #existing_ids == 0 then
+            -- All members are new -> assign a fresh ID
+            chosen_id = global.next_belt_group_id
+            global.next_belt_group_id = global.next_belt_group_id + 1
+        elseif #existing_ids == 1 then
+            -- Unchanged or grown group -> keep existing ID
+            chosen_id = existing_ids[1]
+        else
+            -- Merge: pick the lowest existing ID
+            chosen_id = existing_ids[1]
+            for j = 2, #existing_ids do
+                if existing_ids[j] < chosen_id then
+                    chosen_id = existing_ids[j]
+                end
+            end
+            -- Other IDs are implicitly retired (counter never reused)
+        end
+
+        -- Assign chosen_id to every member
+        for _, uid in ipairs(component) do
+            new_map[uid] = chosen_id
+        end
+    end
+
+    -- 4. Replace the map (removed entities automatically drop out)
+    global.belt_group_map = new_map
+end
+
 global.utils.entity_status_names = function(entity_status)
     local s = entity_status
     if not s then return '"normal"' end
@@ -804,6 +918,14 @@ global.utils.serialize_entity = function(entity)
                 serialized.connected_to = entity.neighbours.unit_number
             end
         end
+
+        -- Stable belt group ID (set by rebuild_belt_groups, O(1) lookup)
+        serialized.belt_group_id = global.belt_group_map[entity.unit_number] or 0
+    end
+
+    -- Splitters also get a belt_group_id
+    if entity.type == "splitter" then
+        serialized.belt_group_id = global.belt_group_map[entity.unit_number] or 0
     end
 
     serialized.id = entity.unit_number
@@ -821,6 +943,110 @@ global.utils.serialize_entity = function(entity)
         end
         -- Convert from per-tick to per-second (Watts)
         serialized.flow_rate = flow_per_tick * 60
+    end
+
+    -- Power switch: serialize state and which poles are connected on each side
+    if entity.type == "power-switch" then
+        serialized.power_switch_state = entity.power_switch_state
+
+        -- Strategy: use copper_connection_definitions to read both sides.
+        -- Each CopperConnectionDefinition has:
+        --   source_wire_connector: defines.wire_connection_id (left / right side of switch)
+        --   target_entity: LuaEntity (the connected pole)
+        --   target_wire_connector: defines.wire_connection_id
+        -- We key side_map by the actual source_wire_connector value (may NOT be 1/2).
+        local side_map = {}
+        local conns = entity.copper_connection_definitions
+        if conns then
+            for _, conn in ipairs(conns) do
+                local side_key = conn.source_wire_connector
+                local pole = conn.target_entity
+                if not side_map[side_key] then
+                    side_map[side_key] = { pole_ids = {}, network_id = nil }
+                end
+                if pole.valid then
+                    if pole.unit_number then
+                        table.insert(side_map[side_key].pole_ids, pole.unit_number)
+                    end
+                    if not side_map[side_key].network_id and pole.electric_network_id then
+                        side_map[side_key].network_id = pole.electric_network_id
+                    end
+                end
+            end
+        end
+
+        -- Build switch_sides from ALL keys in side_map (sorted for determinism)
+        local switch_sides = {}
+        local side_keys = {}
+        for k, _ in pairs(side_map) do
+            table.insert(side_keys, k)
+        end
+        table.sort(side_keys)
+        for _, k in ipairs(side_keys) do
+            table.insert(switch_sides, side_map[k])
+        end
+
+        -- Fallback: if copper_connection_definitions gave < 2 sides, try neighbours.
+        -- For power-switch entities, neighbours returns {copper = {LuaEntity, ...}}
+        -- listing poles connected on either side. We group them by electric_network_id.
+        if #switch_sides < 2 then
+            local neighbours = entity.neighbours
+            if neighbours then
+                local poles_to_check = {}
+                if type(neighbours) == "table" then
+                    if neighbours.copper then
+                        for _, p in ipairs(neighbours.copper) do
+                            table.insert(poles_to_check, p)
+                        end
+                    else
+                        -- neighbours might be indexed arrays: [1]={...}, [2]={...}
+                        for _, v in pairs(neighbours) do
+                            if type(v) == "table" then
+                                -- v might be a single entity or an array
+                                if v.valid then
+                                    table.insert(poles_to_check, v)
+                                else
+                                    for _, p in ipairs(v) do
+                                        if type(p) == "table" and p.valid then
+                                            table.insert(poles_to_check, p)
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+
+                if #poles_to_check > 0 then
+                    -- Group by electric_network_id
+                    local network_poles = {}
+                    for _, pole in ipairs(poles_to_check) do
+                        if pole.valid and pole.electric_network_id then
+                            local nid = pole.electric_network_id
+                            if not network_poles[nid] then
+                                network_poles[nid] = { pole_ids = {}, network_id = nid }
+                            end
+                            if pole.unit_number then
+                                table.insert(network_poles[nid].pole_ids, pole.unit_number)
+                            end
+                        end
+                    end
+
+                    -- Rebuild switch_sides from grouped poles
+                    switch_sides = {}
+                    local net_keys = {}
+                    for k, _ in pairs(network_poles) do
+                        table.insert(net_keys, k)
+                    end
+                    table.sort(net_keys)
+                    for _, k in ipairs(net_keys) do
+                        table.insert(switch_sides, network_poles[k])
+                    end
+                end
+            end
+        end
+
+        serialized.switch_sides = switch_sides
     end
 
     -- Add input and output positions if the entity is a splitter
@@ -891,6 +1117,14 @@ global.utils.serialize_entity = function(entity)
         -- Add max energy usage from prototype for consumption rate
         if entity.prototype and entity.prototype.max_energy_usage then
             serialized.max_energy_usage = entity.prototype.max_energy_usage
+        end
+
+        -- Rolling average items-per-second from sampler.lua (transfer_count is items/tick)
+        serialized.items_per_second = global.utils.get_sample_avg(entity, "transfer_count") * 60
+        -- Last item type transferred (stored by sampler's held_stack transition detector)
+        local last_item = global.inserter_last_item and global.inserter_last_item[entity.unit_number]
+        if last_item then
+            serialized.last_item_type = "\""..last_item.."\""
         end
 
         ---- round to the nearest 0.5
@@ -1118,6 +1352,9 @@ global.utils.serialize_entity = function(entity)
         serialized.drop_position.x = math.round(serialized.drop_position.x * 2) / 2
         serialized.drop_position.y = math.round(serialized.drop_position.y * 2) / 2
         -- game.print("Mining drill drop position: " .. serpent.line(serialized.drop_position))
+
+        -- Rolling average items-per-second from sampler.lua (mining_output_count is completions/tick)
+        serialized.mining_items_per_second = global.utils.get_sample_avg(entity, "mining_output_count") * 60
 
         -- Get the mining area
         local prototype = game.entity_prototypes[entity.name]
@@ -1422,6 +1659,32 @@ global.utils.serialize_entity = function(entity)
 
     if entity.electric_network_id then
         serialized.electrical_id = entity.electric_network_id
+    end
+
+    -- Universal electric energy source data for electric consumers/producers.
+    -- Ensures max_energy_usage and drain are available on electric entity types,
+    -- not just the ones that had it added per-type (inserter, boiler, accumulator).
+    -- Guard: max_energy_usage > 0 filters out non-electric entities (belts, pipes,
+    -- power switches, constant combinators) where the runtime returns 0.
+    if entity.prototype then
+        if entity.prototype.max_energy_usage and entity.prototype.max_energy_usage > 0 and not serialized.max_energy_usage then
+            serialized.max_energy_usage = entity.prototype.max_energy_usage
+        end
+        local eesp = entity.prototype.electric_energy_source_prototype
+        if eesp then
+            if eesp.drain then
+                serialized.electric_drain = eesp.drain
+            end
+        end
+    end
+
+    -- Utilization: fraction of time the entity was in a working status (0.0-1.0).
+    -- Only meaningful for entities the sampler tracks (pipes/poles excluded).
+    if entity.unit_number and global.sampled_entities and global.sampled_entities[entity.unit_number] then
+        local util = global.utils.get_sample_avg(entity, "is_working")
+        if util then
+            serialized.utilization = util
+        end
     end
 
     serialized.direction = get_inverse_entity_direction(entity.name, entity.direction) --api_direction_map[entity.direction]

@@ -38,6 +38,7 @@ def _deduplicate_entities(entities: List[Entity]) -> List[Entity]:
 def _construct_group(
     id: int, entities: List[Entity], prototype: Prototype, position: Position,
     fluid_handlers: List[Entity] = None,
+    power_switches: List[Entity] = None,
 ) -> EntityGroup:
     if prototype == Prototype.TransportBelt or isinstance(entities[0], TransportBelt):
         # Always return BeltGroup for consistent return types, even for single belts
@@ -78,7 +79,7 @@ def _construct_group(
             status = EntityStatus.EMPTY
 
         return BeltGroup(
-            id=0,
+            id=id,
             belts=entities,
             inventory=inventory,
             inputs=inputs,
@@ -108,6 +109,7 @@ def _construct_group(
         Prototype.SmallElectricPole,
         Prototype.BigElectricPole,
         Prototype.MediumElectricPole,
+        Prototype.Substation,
     ):
         if any([pole.flow_rate > 0 for pole in entities]):
             status = EntityStatus.WORKING
@@ -117,8 +119,9 @@ def _construct_group(
         mean_y = mean([pole.position.y for pole in entities])
 
         return ElectricityGroup(
-            id=entities[0].electrical_id,
+            id=id,  # Use the canonical (merged) id, not first entity's electrical_id
             poles=list(set(entities)),
+            power_switches=power_switches or [],
             status=status,
             position=Position(x=mean_x, y=mean_y),
         )
@@ -578,12 +581,14 @@ def construct_belt_groups(
 
 def agglomerate_groupable_entities(
     connected_entities: List[Entity],
+    **kwargs,
 ) -> List[EntityGroup]:
     """
     Group contiguous transport belts into BeltGroup objects.
 
     Args:
         connected_entities: List of TransportBelt / Pipe objects to group
+        power_switches: Optional list of power switch entities for electricity group merging
 
     Returns:
         List of BeltGroup objects, each containing connected belts
@@ -608,6 +613,7 @@ def agglomerate_groupable_entities(
         Prototype.SmallElectricPole,
         Prototype.BigElectricPole,
         Prototype.MediumElectricPole,
+        Prototype.Substation,
     ):
         electricity_ids = {}
         for entity in connected_entities:
@@ -616,12 +622,58 @@ def agglomerate_groupable_entities(
             else:
                 electricity_ids[entity.electrical_id] = [entity]
 
+        # Power switch merge: union-find ON switches' network IDs
+        canonical = {}  # network_id -> canonical_id
+        switch_by_group = {}  # canonical_id -> [switch entities]
+
+        if kwargs.get('power_switches'):
+            for sw in kwargs['power_switches']:
+                sides = getattr(sw, 'switch_sides', None)
+                state = getattr(sw, 'power_switch_state', False)
+
+                if state and sides and len(sides) >= 2:
+                    side_a = sides[0] if isinstance(sides[0], dict) else {}
+                    side_b = sides[1] if isinstance(sides[1], dict) else {}
+                    net_a = side_a.get('network_id')
+                    net_b = side_b.get('network_id')
+                    if net_a and net_b and net_a != net_b:
+                        # Resolve transitively
+                        while net_a in canonical: net_a = canonical[net_a]
+                        while net_b in canonical: net_b = canonical[net_b]
+                        if net_a != net_b:
+                            lo, hi = min(net_a, net_b), max(net_a, net_b)
+                            canonical[hi] = lo
+
+            # Merge pole lists under canonical IDs
+            merged = {}
+            for eid, pole_list in electricity_ids.items():
+                cid = eid
+                while cid in canonical: cid = canonical[cid]
+                merged.setdefault(cid, []).extend(pole_list)
+            electricity_ids = merged
+
+            # Attach power switch entities to their canonical group
+            for sw in kwargs['power_switches']:
+                sides = getattr(sw, 'switch_sides', None)
+                if sides:
+                    assigned = set()
+                    for side in sides:
+                        if isinstance(side, dict):
+                            net = side.get('network_id')
+                            if net:
+                                cid = net
+                                while cid in canonical: cid = canonical[cid]
+                                if cid not in assigned:
+                                    switch_by_group.setdefault(cid, []).append(sw)
+                                    assigned.add(cid)
+
         return [
             _construct_group(
                 id=id,
                 entities=entities,
                 prototype=prototype,
                 position=entities[0].position,
+                power_switches=switch_by_group.get(id, []),
             )
             for id, entities in electricity_ids.items()
         ]
@@ -659,8 +711,28 @@ def agglomerate_groupable_entities(
         Prototype.FastUndergroundBelt,
         Prototype.ExpressUndergroundBelt,
     ):
-        groups = construct_belt_groups(connected_entities, prototype)
-        return groups
+        # Group belts by their Lua-assigned belt_group_id (stable, persistent)
+        belt_group_ids = {}
+        for entity in connected_entities:
+            gid = getattr(entity, 'belt_group_id', 0)
+            if gid in belt_group_ids:
+                belt_group_ids[gid].append(entity)
+            else:
+                belt_group_ids[gid] = [entity]
+
+        groups = [
+            _construct_group(
+                id=gid,
+                entities=entities,
+                prototype=prototype,
+                position=entities[0].position,
+            )
+            for gid, entities in belt_group_ids.items()
+        ]
+        try:
+            return consolidate_underground_belts(groups)
+        except Exception as e:
+            raise e
 
     raise RuntimeError(
         "Failed to group an entity with prototype: {}".format(prototype.name)

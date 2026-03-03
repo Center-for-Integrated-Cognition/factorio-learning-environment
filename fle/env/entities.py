@@ -54,8 +54,8 @@ class EntityStatus(Enum):
     # DISABLED_BY_SCRIPT = "disabled_by_script"
     # MARKED_FOR_DECONSTRUCTION = "marked_for_deconstruction"
     NOT_PLUGGED_IN_ELECTRIC_NETWORK = "not_plugged_in_electric_network"
-    # NETWORKS_CONNECTED = "networks_connected"
-    # NETWORKS_DISCONNECTED = "networks_disconnected"
+    NETWORKS_CONNECTED = "networks_connected"
+    NETWORKS_DISCONNECTED = "networks_disconnected"
     CHARGING = "charging"
     DISCHARGING = "discharging"
     FULLY_CHARGED = "fully_charged"
@@ -461,7 +461,7 @@ class Entity(EntityCore):
     """Base class for all entities in the game."""
 
     id: Optional[int] = None
-    energy: float
+    energy: float = 0
     type: Optional[str] = None
     dimensions: Dimensions
     tile_dimensions: TileDimensions
@@ -557,6 +557,7 @@ class TransportBelt(Entity):
     inventory: Dict[Literal["left", "right"], Inventory] = {"left": {}, "right": {}}
     is_terminus: bool = False
     is_source: bool = False
+    belt_group_id: int = 0
     _height: float = 1
     _width: float = 1
 
@@ -984,6 +985,7 @@ class ElectricityGroup(EntityGroup):
 
     name: str = "electricity-group"
     poles: List[ElectricityPole]
+    power_switches: list = []
 
     def __repr__(self) -> str:
         positions = [f"(x={p.position.x},y={p.position.y})" for p in self.poles]

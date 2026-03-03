@@ -81,8 +81,13 @@ class GetEntities(Tool):
                         Prototype.SmallElectricPole,
                         Prototype.MediumElectricPole,
                         Prototype.BigElectricPole,
+                        Prototype.Substation,
                     }
                     expanded_entities.update(pole_types)
+                    # Power switches are fetched so their switch_sides data can
+                    # be used to merge electricity groups, but they are not
+                    # returned as standalone entities.
+                    internal_entities.add(Prototype.PowerSwitch)
                     group_requests.add(Prototype.ElectricityGroup)
                 else:
                     expanded_entities.add(entity)
@@ -160,7 +165,8 @@ class GetEntities(Tool):
 
                 # remove all empty values from the entity_data dictionary
                 entity_data = {
-                    k: v for k, v in entity_data.items() if v or isinstance(v, int)
+                    k: v for k, v in entity_data.items()
+                    if v or isinstance(v, int)
                 }
 
                 try:
@@ -284,25 +290,55 @@ class GetEntities(Tool):
                         ))
 
                 # Second pass: group directly-connected fluid handlers
-                # that have no fluid system ID (direct connections, no pipes)
-                ungrouped_handlers = [
+                # that have fluidbox_neighbours but whose connections aren't
+                # fully covered by existing fluid system groups.
+                #
+                # Key insight: Factorio's get_fluid_system_id() returns nil for
+                # direct fluidbox-to-fluidbox connections (e.g. boiler steam
+                # output → steam engine input with no pipe). So:
+                #   - Boiler gets fluidbox_ids=[19] (water only; steam slot nil→skipped)
+                #   - Steam engine gets fluidbox_id=0 (its steam slot is also nil)
+                # The first pass only creates water groups. The steam connection
+                # is invisible unless we use fluidbox_neighbours to discover it.
+
+                # Collect ALL fluid handlers with neighbours (not just fluidbox_id==0)
+                all_handlers_with_neighbours = [
                     entity
                     for entity in entities_list
                     if hasattr(entity, "fluidbox_neighbours")
                     and entity.fluidbox_neighbours
-                    and getattr(entity, "fluidbox_id", 0) == 0
                     and not isinstance(entity, Pipe)
+                    and not isinstance(entity, PipeGroup)
                 ]
 
-                if ungrouped_handlers:
-                    # Build lookup: entity id -> entity object
-                    id_to_entity = {e.id: e for e in ungrouped_handlers}
+                if all_handlers_with_neighbours:
+                    # Build co-membership index: for each existing PipeGroup,
+                    # record which pairs of entity IDs are already grouped together.
+                    # An edge (A↔B) is "covered" if A and B are both fluid_handlers
+                    # in the same PipeGroup.
+                    existing_group_members = []  # list of sets of entity IDs
+                    for e in entities_list:
+                        if isinstance(e, PipeGroup):
+                            member_ids = frozenset(
+                                h.id for h in getattr(e, 'fluid_handlers', [])
+                            )
+                            if member_ids:
+                                existing_group_members.append(member_ids)
 
-                    # Ensure EntityStatus is imported (may not be if no pipe groups existed)
+                    def edge_already_covered(id_a, id_b):
+                        """True if id_a and id_b co-occur in some existing PipeGroup."""
+                        for member_set in existing_group_members:
+                            if id_a in member_set and id_b in member_set:
+                                return True
+                        return False
+
+                    # Build lookup: entity id -> entity object
+                    id_to_handler = {e.id: e for e in all_handlers_with_neighbours}
+
                     from fle.env.entities import EntityStatus as ES
 
-                    # Union-Find to discover connected components
-                    parent = {e.id: e.id for e in ungrouped_handlers}
+                    # Union-Find to discover connected components via fluidbox_neighbours
+                    parent = {e.id: e.id for e in all_handlers_with_neighbours}
 
                     def find(x):
                         while parent[x] != x:
@@ -315,22 +351,46 @@ class GetEntities(Tool):
                         if ra != rb:
                             parent[ra] = rb
 
-                    for handler in ungrouped_handlers:
+                    # Track actual edges discovered (for coverage checking)
+                    component_edges = {}  # root -> list of (id_a, id_b)
+
+                    for handler in all_handlers_with_neighbours:
                         for neighbour_id in handler.fluidbox_neighbours:
-                            if neighbour_id in id_to_entity:
+                            if neighbour_id in id_to_handler:
                                 union(handler.id, neighbour_id)
 
                     # Collect components
                     components = {}
-                    for handler in ungrouped_handlers:
+                    for handler in all_handlers_with_neighbours:
                         root = find(handler.id)
                         if root not in components:
                             components[root] = []
                         components[root].append(handler)
 
-                    # Create PipeGroups with synthetic negative IDs
+                    # Rebuild edges per component (after union-find is settled)
+                    for root, members in components.items():
+                        edges = []
+                        member_ids = {m.id for m in members}
+                        for m in members:
+                            for neighbour_id in m.fluidbox_neighbours:
+                                if neighbour_id in member_ids and m.id < neighbour_id:
+                                    edges.append((m.id, neighbour_id))
+                        component_edges[root] = edges
+
+                    # Create new PipeGroups only for components that have at
+                    # least one edge NOT already covered by an existing PipeGroup.
+                    # This is edge-level, not entity-level: entities A, B, C might
+                    # all appear in existing groups, but if A↔B is a NEW connection
+                    # (e.g. steam vs water), it still gets its own group.
                     synthetic_id = -1
                     for root, members in components.items():
+                        edges = component_edges[root]
+                        # Skip if every edge in this component is already covered
+                        if edges and all(edge_already_covered(a, b) for a, b in edges):
+                            continue
+                        # Also skip single-entity components with no edges
+                        if not edges:
+                            continue
                         entities_list.append(PipeGroup(
                             id=synthetic_id,
                             pipes=[],
@@ -349,9 +409,15 @@ class GetEntities(Tool):
                         Prototype.SmallElectricPole,
                         Prototype.BigElectricPole,
                         Prototype.MediumElectricPole,
+                        Prototype.Substation,
                     )
                 ]
-                group = agglomerate_groupable_entities(poles)
+                power_switches = [
+                    entity
+                    for entity in entities_list
+                    if hasattr(entity, "name") and entity.name == "power-switch"
+                ]
+                group = agglomerate_groupable_entities(poles, power_switches=power_switches)
                 [entities_list.remove(pole) for pole in poles]
                 entities_list.extend(group)
 
@@ -401,6 +467,7 @@ class GetEntities(Tool):
                                 Prototype.SmallElectricPole,
                                 Prototype.MediumElectricPole,
                                 Prototype.BigElectricPole,
+                                Prototype.Substation,
                             }
                             if Prototype.ElectricityGroup in group_requests:
                                 # Explicit group request - return the group
