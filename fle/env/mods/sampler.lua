@@ -1,8 +1,9 @@
 --- sampler.lua
 --- Tick-level ring buffer sampler for entity properties.
---- Provides a 10-second (600 tick) rolling average — long enough to cover
---- at least 2 full crafting cycles of the slowest fluid-processing recipes
---- (e.g. advanced oil processing at 5 seconds per craft).
+--- Provides a rolling average over a configurable window (default 30 seconds /
+--- 1800 ticks at 60 UPS) — long enough to cover at least 2 full crafting
+--- cycles of the slowest fluid-processing recipes (e.g. advanced oil
+--- processing at 5 seconds per craft).
 ---
 --- ARCHITECTURE:
 ---   - Registers script.on_nth_tick(1, ...) to sample every tick.
@@ -10,6 +11,18 @@
 ---   - Stores samples in global.energy_samples[unit_number][property][cursor].
 ---   - serialize.lua calls global.utils.get_sample_avg(entity, property)
 ---     to read the rolling average instead of the raw instantaneous value.
+---
+--- CONFIGURABLE WINDOW SIZE:
+---   The window size defaults to 1800 ticks (30 s) and is stored in
+---   global.sampler_window_size.  It can be changed at runtime from Python
+---   (or any RCON client) without restarting the game:
+---
+---     -- via RCON (e.g. from export_scenario_model.py --sampler-window-seconds)
+---     /sc global.utils.set_sampler_window_size(600)   -- 10 seconds
+---
+---   set_sampler_window_size(ticks) reinitialises all existing ring buffers,
+---   pre-filling them with the current rolling average so there is no
+---   cold-start drag.  The cursor is reset to 0.
 ---
 --- PROPERTIES SAMPLED (only those currently serialized that are instantaneous):
 ---   - "energy"                    : entity.energy (accumulator buffer fill, J)
@@ -99,7 +112,12 @@
 ---      currently dumps entity tables (via dump() in serialize.lua).
 --- ============================================================================
 
-local WINDOW_SIZE = 600  -- 10 seconds at 60 UPS (covers 2 full oil-refinery cycles)
+-- Default window size: 30 seconds at 60 UPS.  Can be changed at runtime
+-- via global.utils.set_sampler_window_size(ticks) from an RCON command.
+if not global.sampler_window_size then
+    global.sampler_window_size = 1800
+end
+local WINDOW_SIZE = global.sampler_window_size
 
 -- Statuses that count as "working" (actively carrying out a process) for utilization tracking.
 -- Checked via numeric comparison against defines.entity_status values.
@@ -147,6 +165,41 @@ end
 if not global.drill_prev_progress then
     -- Previous tick's mining_progress per mining drill (float 0..1)
     global.drill_prev_progress = {}
+end
+
+--- Change the sampler window size at runtime.  Reinitialises every existing
+--- ring buffer so that running sums stay consistent.
+--- @param new_size number  New window size in ticks (e.g. 3600 = 60 s).
+global.utils.set_sampler_window_size = function(new_size)
+    if not new_size or new_size < 1 then return end
+    new_size = math.floor(new_size)
+    local old_size = global.sampler_window_size or 1800
+    if new_size == old_size then return end
+
+    global.sampler_window_size = new_size
+    -- Update the upvalue used by the tick handler & helpers
+    WINDOW_SIZE = new_size
+
+    -- Reinitialise every registered entity's ring buffers.
+    -- We cannot meaningfully remap old samples into a differently-sized
+    -- buffer, so we simply pre-fill with the current running-average
+    -- (best available estimate) to avoid a cold-start drag.
+    for uid, props in pairs(global.energy_samples) do
+        for prop, buf in pairs(props) do
+            local old_sum = global.sample_running_sums[uid] and global.sample_running_sums[uid][prop]
+            local fill = (old_sum and old_size > 0) and (old_sum / old_size) or 0
+            global.energy_samples[uid][prop] = {}
+            for i = 1, new_size do
+                global.energy_samples[uid][prop][i] = fill
+            end
+            if not global.sample_running_sums[uid] then
+                global.sample_running_sums[uid] = {}
+            end
+            global.sample_running_sums[uid][prop] = fill * new_size
+        end
+    end
+    global.sample_cursor = 0
+    log("[sampler] window size changed from " .. old_size .. " to " .. new_size .. " ticks")
 end
 
 --- Register an entity for sampling. Called lazily the first time
