@@ -202,6 +202,47 @@ global.utils.set_sampler_window_size = function(new_size)
     log("[sampler] window size changed from " .. old_size .. " to " .. new_size .. " ticks")
 end
 
+--- Cache of solar panel max production per prototype name (J/tick).
+--- Populated lazily by get_solar_max_production().
+if not global.solar_max_production_cache then
+    global.solar_max_production_cache = {}
+end
+
+--- Return the solar panel's rated maximum production in J/tick.
+--- When electric_output_flow_limit is math.huge, the panel is producing at
+--- this capacity (the network is not constraining it).
+--- Tries multiple Factorio API properties with pcall and caches the result.
+local function get_solar_max_production(entity)
+    local name = entity.name
+    if global.solar_max_production_cache[name] then
+        return global.solar_max_production_cache[name]
+    end
+
+    -- 1. Try entity.prototype.max_energy_production (available in some Factorio builds)
+    local ok, val = pcall(function() return entity.prototype.max_energy_production end)
+    if ok and val and type(val) == "number" and val > 0 and val ~= math.huge then
+        global.solar_max_production_cache[name] = val
+        log("[sampler] solar max production for '" .. name .. "' from max_energy_production: " .. val .. " J/tick")
+        return val
+    end
+
+    -- 2. Try electric_energy_source_prototype.output_flow_limit
+    local ok2, val2 = pcall(function()
+        return entity.prototype.electric_energy_source_prototype.output_flow_limit
+    end)
+    if ok2 and val2 and type(val2) == "number" and val2 > 0 and val2 ~= math.huge then
+        global.solar_max_production_cache[name] = val2
+        log("[sampler] solar max production for '" .. name .. "' from eesp.output_flow_limit: " .. val2 .. " J/tick")
+        return val2
+    end
+
+    -- 3. Hardcoded fallback: standard solar-panel = 60kW = 1000 J/tick
+    local fallback = 1000
+    global.solar_max_production_cache[name] = fallback
+    log("[sampler] solar max production for '" .. name .. "' using fallback: " .. fallback .. " J/tick")
+    return fallback
+end
+
 --- Register an entity for sampling. Called lazily the first time
 --- serialize.lua encounters an entity that needs averaging.
 global.utils.register_for_sampling = function(entity)
@@ -220,7 +261,14 @@ global.utils.register_for_sampling = function(entity)
     elseif entity.type == "generator" then
         props["energy_generated_last_tick"] = entity.energy_generated_last_tick or 0
     elseif entity.type == "solar-panel" then
-        props["electric_output_flow_limit"] = entity.electric_output_flow_limit or 0
+        -- Factorio reports math.huge for electric_output_flow_limit when the
+        -- network doesn't constrain the panel.  This means the panel IS
+        -- producing at its full rated capacity, so clamp to that value.
+        local solar_val = entity.electric_output_flow_limit or 0
+        if solar_val == math.huge or solar_val == -math.huge then
+            solar_val = get_solar_max_production(entity)
+        end
+        props["electric_output_flow_limit"] = solar_val
     end
     -- Register all fluidbox slots for any entity with a fluidbox.
     -- This covers pipes (single slot), assembling-machines (oil-refinery,
@@ -277,7 +325,12 @@ global.utils.get_sample_avg = function(entity, property)
     local sums = global.sample_running_sums[uid]
     if not sums or not sums[property] then return 0 end
 
-    return sums[property] / WINDOW_SIZE
+    local avg = sums[property] / WINDOW_SIZE
+    -- Guard against non-finite results (NaN or inf from corrupted running sums)
+    if avg ~= avg or avg == math.huge or avg == -math.huge then
+        return 0
+    end
+    return avg
 end
 
 --- Update the is_working property for one entity in the ring buffer.
@@ -351,10 +404,24 @@ script.on_nth_tick(1, function(event)
             end
             local s = global.energy_samples[uid]
             if s and s["electric_output_flow_limit"] then
-                local old = s["electric_output_flow_limit"][cursor] or 0
                 local new = entity.electric_output_flow_limit or 0
+                -- Factorio reports math.huge when the network doesn't constrain
+                -- the panel.  This means it IS producing at full rated capacity.
+                if new == math.huge or new == -math.huge then
+                    new = get_solar_max_production(entity)
+                end
+                local old = s["electric_output_flow_limit"][cursor] or 0
+                -- Clamp stale math.huge values left in the buffer from before this fix
+                if old == math.huge or old == -math.huge or old ~= old then
+                    old = 0
+                end
                 s["electric_output_flow_limit"][cursor] = new
-                global.sample_running_sums[uid]["electric_output_flow_limit"] = (global.sample_running_sums[uid]["electric_output_flow_limit"] or 0) - old + new
+                local sum = (global.sample_running_sums[uid]["electric_output_flow_limit"] or 0) - old + new
+                -- Guard against corrupted running sum (NaN or inf from old math.huge values)
+                if sum ~= sum or sum == math.huge or sum == -math.huge then
+                    sum = new * WINDOW_SIZE
+                end
+                global.sample_running_sums[uid]["electric_output_flow_limit"] = sum
             end
             update_is_working(entity, uid, cursor)
         end

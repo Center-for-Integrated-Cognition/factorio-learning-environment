@@ -1506,8 +1506,15 @@ global.utils.serialize_entity = function(entity)
     end
 
     if entity.type == "solar-panel" then
-        -- Use 5-second rolling average instead of instantaneous value
+        -- Use 5-second rolling average instead of instantaneous value.
+        -- get_sample_avg already guards against non-finite results (returns 0).
         serialized.electric_output_flow_limit = global.utils.get_sample_avg(entity, "electric_output_flow_limit")
+        -- Expose the prototype's max production (J/tick) so the Python side
+        -- can use it for display / clamping without hardcoding.
+        local ok, mep = pcall(function() return entity.prototype.max_energy_production end)
+        if ok and mep and type(mep) == "number" and mep > 0 and mep ~= math.huge then
+            serialized.max_energy_production = mep
+        end
     end
 
     if entity.type == 'accumulator' then
