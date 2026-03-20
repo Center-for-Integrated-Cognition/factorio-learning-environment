@@ -702,9 +702,9 @@ global.utils.get_entity_direction = get_entity_direction
 
 global.utils.serialize_recipe = function(recipe)
     local function serialize_number(num)
-        if num == math.huge then
+        if num ~= num or num >= 1e300 then
             return "inf"
-        elseif num == -math.huge then
+        elseif num <= -1e300 then
             return "-inf"
         else
             return tostring(num)
@@ -1508,13 +1508,23 @@ global.utils.serialize_entity = function(entity)
     if entity.type == "solar-panel" then
         -- Use 5-second rolling average instead of instantaneous value.
         -- get_sample_avg already guards against non-finite results (returns 0).
-        serialized.electric_output_flow_limit = global.utils.get_sample_avg(entity, "electric_output_flow_limit")
-        -- Expose the prototype's max production (J/tick) so the Python side
-        -- can use it for display / clamping without hardcoding.
-        local ok, mep = pcall(function() return entity.prototype.max_energy_production end)
-        if ok and mep and type(mep) == "number" and mep > 0 and mep ~= math.huge then
-            serialized.max_energy_production = mep
+        local avg_output = global.utils.get_sample_avg(entity, "electric_output_flow_limit")
+        -- Determine rated capacity from prototype (same field the sampler caches)
+        local max_prod = global.utils.get_solar_max_production
+                         and global.utils.get_solar_max_production(entity)
+                         or nil
+        if not max_prod then
+            local ok, mep = pcall(function() return entity.prototype.max_energy_production end)
+            if ok and mep and type(mep) == "number" and mep > 0 and mep < 1e300 then
+                max_prod = mep
+            else
+                max_prod = 1000  -- fallback: standard 60kW panel = 1000 J/tick
+            end
         end
+        -- Clamp averaged output to rated capacity and emit as energy_generated_last_tick
+        -- so the Python side treats solar panels identically to generators.
+        serialized.energy_generated_last_tick = math.min(avg_output, max_prod)
+        serialized.max_power_output = max_prod
     end
 
     if entity.type == 'accumulator' then

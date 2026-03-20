@@ -112,6 +112,14 @@
 ---      currently dumps entity tables (via dump() in serialize.lua).
 --- ============================================================================
 
+-- Factorio sometimes returns DBL_MAX (~1.7977e+308) instead of math.huge
+-- (positive infinity) for unconstrained values like electric_output_flow_limit.
+-- This helper detects both cases to prevent overflow when summing across the
+-- ring buffer.  Also catches NaN for safety.
+local function is_huge(v)
+    return v ~= v or v >= 1e300 or v <= -1e300
+end
+
 -- Default window size: 30 seconds at 60 UPS.  Can be changed at runtime
 -- via global.utils.set_sampler_window_size(ticks) from an RCON command.
 if not global.sampler_window_size then
@@ -139,34 +147,32 @@ local CRAFTING_ENTITY_TYPES = {
     "reactor", "beacon", "boiler"
 }
 
--- Initialize global storage if not present
-if not global.energy_samples then
-    global.energy_samples = {}
-end
-if not global.sample_cursor then
-    global.sample_cursor = 0
-end
-if not global.sampled_entities then
-    -- Set of unit_numbers we are actively sampling
-    global.sampled_entities = {}
-end
-if not global.sample_running_sums then
-    -- O(1) running sums: global.sample_running_sums[unit_number][property] = sum
-    global.sample_running_sums = {}
-end
-if not global.inserter_prev_held then
-    -- Previous tick's held_stack state per inserter: {name=string, count=number} or nil
-    global.inserter_prev_held = {}
-end
-if not global.inserter_last_item then
-    -- Name of the last item type transferred by each inserter
-    global.inserter_last_item = {}
-end
-if not global.drill_prev_progress then
-    -- Previous tick's mining_progress per mining drill (float 0..1)
-    global.drill_prev_progress = {}
-end
+-- Initialize global storage.  We ALWAYS reset on script load to avoid stale
+-- data from a previous session (the Factorio server may persist across
+-- Python-side resets while entities are cleared and re-placed with recycled
+-- unit_numbers).  The `if not` pattern was the original design but caused
+-- corrupted running sums when stale buffers survived a game reset.
+global.energy_samples = {}
+global.sample_cursor = 0
+global.sampled_entities = {}
+global.sample_running_sums = {}
+global.inserter_prev_held = {}
+global.inserter_last_item = {}
+global.drill_prev_progress = {}
 
+-- ---------------------------------------------------------------------------
+-- Global production flow tracking (force-level, not per-entity)
+-- ---------------------------------------------------------------------------
+-- Tracks per-tick deltas of force.item/fluid_production_statistics so that
+-- global flows use the same 30s rolling window as all group-level flows.
+-- Structure:
+--   global.production_flow_ring[item_name]["produced"|"consumed"][cursor] = delta
+--   global.production_flow_sums[item_name]["produced"|"consumed"] = running_sum
+--   global.production_flow_prev["produced"|"consumed"][item_name] = cumulative_count
+-- Reset production flow globals on load (same rationale as entity data above)
+global.production_flow_ring = {}
+global.production_flow_sums = {}
+global.production_flow_prev = { produced = {}, consumed = {} }
 --- Change the sampler window size at runtime.  Reinitialises every existing
 --- ring buffer so that running sums stay consistent.
 --- @param new_size number  New window size in ticks (e.g. 3600 = 60 s).
@@ -220,7 +226,7 @@ local function get_solar_max_production(entity)
 
     -- 1. Try entity.prototype.max_energy_production (available in some Factorio builds)
     local ok, val = pcall(function() return entity.prototype.max_energy_production end)
-    if ok and val and type(val) == "number" and val > 0 and val ~= math.huge then
+    if ok and val and type(val) == "number" and val > 0 and not is_huge(val) then
         global.solar_max_production_cache[name] = val
         log("[sampler] solar max production for '" .. name .. "' from max_energy_production: " .. val .. " J/tick")
         return val
@@ -230,7 +236,7 @@ local function get_solar_max_production(entity)
     local ok2, val2 = pcall(function()
         return entity.prototype.electric_energy_source_prototype.output_flow_limit
     end)
-    if ok2 and val2 and type(val2) == "number" and val2 > 0 and val2 ~= math.huge then
+    if ok2 and val2 and type(val2) == "number" and val2 > 0 and not is_huge(val2) then
         global.solar_max_production_cache[name] = val2
         log("[sampler] solar max production for '" .. name .. "' from eesp.output_flow_limit: " .. val2 .. " J/tick")
         return val2
@@ -243,6 +249,70 @@ local function get_solar_max_production(entity)
     return fallback
 end
 
+-- Expose as global utility so serialize.lua can call it
+global.utils.get_solar_max_production = get_solar_max_production
+
+--- Return global production/consumption flow rates from the rolling window.
+--- Rates are in items-per-tick (caller multiplies by 60 to get per-second).
+--- @return table {produced={[name]=rate,...}, consumed={[name]=rate,...}}
+global.utils.get_global_flow_rates = function()
+    local result = { produced = {}, consumed = {} }
+    for name, sums in pairs(global.production_flow_sums) do
+        local prod = (sums.produced or 0) / WINDOW_SIZE
+        local cons = (sums.consumed or 0) / WINDOW_SIZE
+        if prod > 1e-12 then result.produced[name] = prod end
+        if cons > 1e-12 then result.consumed[name] = cons end
+    end
+    return result
+end
+
+--- Diagnostic: dump ring buffer state for a given unit_number.
+--- Returns a table with window_size, cursor, and per-property stats
+--- (running_sum, computed_sum, buffer_len, min, max, avg) so that
+--- the caller can verify the running sum is consistent with the buffer.
+--- Usage from RCON:
+---   /sc rcon.print(serpent.line(global.utils.debug_sampler_state(166)))
+global.utils.debug_sampler_state = function(uid)
+    local result = {
+        window_size = WINDOW_SIZE,
+        global_window_size = global.sampler_window_size,
+        cursor = global.sample_cursor,
+        entity_registered = global.sampled_entities[uid] or false,
+        properties = {}
+    }
+    local samples = global.energy_samples[uid]
+    local sums = global.sample_running_sums[uid]
+    if not samples then
+        result.error = "no samples for uid " .. tostring(uid)
+        return result
+    end
+    for prop, buf in pairs(samples) do
+        local running_sum = sums and sums[prop] or 0
+        -- Recompute sum from buffer to check consistency
+        local computed_sum = 0
+        local buf_len = 0
+        local buf_min = math.huge
+        local buf_max = -math.huge
+        for i = 1, WINDOW_SIZE do
+            local v = buf[i] or 0
+            computed_sum = computed_sum + v
+            if v < buf_min then buf_min = v end
+            if v > buf_max then buf_max = v end
+            buf_len = buf_len + 1
+        end
+        result.properties[prop] = {
+            running_sum = running_sum,
+            computed_sum = computed_sum,
+            drift = running_sum - computed_sum,
+            buf_len = buf_len,
+            buf_min = buf_min,
+            buf_max = buf_max,
+            avg = running_sum / WINDOW_SIZE,
+            computed_avg = computed_sum / WINDOW_SIZE,
+        }
+    end
+    return result
+end
 --- Register an entity for sampling. Called lazily the first time
 --- serialize.lua encounters an entity that needs averaging.
 global.utils.register_for_sampling = function(entity)
@@ -265,7 +335,7 @@ global.utils.register_for_sampling = function(entity)
         -- network doesn't constrain the panel.  This means the panel IS
         -- producing at its full rated capacity, so clamp to that value.
         local solar_val = entity.electric_output_flow_limit or 0
-        if solar_val == math.huge or solar_val == -math.huge then
+        if is_huge(solar_val) then
             solar_val = get_solar_max_production(entity)
         end
         props["electric_output_flow_limit"] = solar_val
@@ -327,7 +397,7 @@ global.utils.get_sample_avg = function(entity, property)
 
     local avg = sums[property] / WINDOW_SIZE
     -- Guard against non-finite results (NaN or inf from corrupted running sums)
-    if avg ~= avg or avg == math.huge or avg == -math.huge then
+    if is_huge(avg) then
         return 0
     end
     return avg
@@ -405,20 +475,20 @@ script.on_nth_tick(1, function(event)
             local s = global.energy_samples[uid]
             if s and s["electric_output_flow_limit"] then
                 local new = entity.electric_output_flow_limit or 0
-                -- Factorio reports math.huge when the network doesn't constrain
-                -- the panel.  This means it IS producing at full rated capacity.
-                if new == math.huge or new == -math.huge then
+                -- Factorio may return math.huge OR DBL_MAX (~1.798e+308) when
+                -- the network doesn't constrain the panel.  Clamp to rated max.
+                if is_huge(new) then
                     new = get_solar_max_production(entity)
                 end
                 local old = s["electric_output_flow_limit"][cursor] or 0
-                -- Clamp stale math.huge values left in the buffer from before this fix
-                if old == math.huge or old == -math.huge or old ~= old then
+                -- Clamp stale huge values left in the buffer
+                if is_huge(old) then
                     old = 0
                 end
                 s["electric_output_flow_limit"][cursor] = new
                 local sum = (global.sample_running_sums[uid]["electric_output_flow_limit"] or 0) - old + new
-                -- Guard against corrupted running sum (NaN or inf from old math.huge values)
-                if sum ~= sum or sum == math.huge or sum == -math.huge then
+                -- Guard against corrupted running sum
+                if is_huge(sum) then
                     sum = new * WINDOW_SIZE
                 end
                 global.sample_running_sums[uid]["electric_output_flow_limit"] = sum

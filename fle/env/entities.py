@@ -48,18 +48,18 @@ class EntityStatus(Enum):
     LOW_POWER = "low_power"
     NO_FUEL = "no_fuel"
     EMPTY = "empty"
-    # DISABLED_BY_CONTROL_BEHAVIOR = "disabled_by_control_behavior"
-    # OPENED_BY_CIRCUIT_NETWORK = "opened_by_circuit_network"
-    # CLOSED_BY_CIRCUIT_NETWORK = "closed_by_circuit_network"
-    # DISABLED_BY_SCRIPT = "disabled_by_script"
-    # MARKED_FOR_DECONSTRUCTION = "marked_for_deconstruction"
+    DISABLED_BY_CONTROL_BEHAVIOR = "disabled_by_control_behavior"
+    OPENED_BY_CIRCUIT_NETWORK = "opened_by_circuit_network"
+    CLOSED_BY_CIRCUIT_NETWORK = "closed_by_circuit_network"
+    DISABLED_BY_SCRIPT = "disabled_by_script"
+    MARKED_FOR_DECONSTRUCTION = "marked_for_deconstruction"
     NOT_PLUGGED_IN_ELECTRIC_NETWORK = "not_plugged_in_electric_network"
     NETWORKS_CONNECTED = "networks_connected"
     NETWORKS_DISCONNECTED = "networks_disconnected"
     CHARGING = "charging"
     DISCHARGING = "discharging"
     FULLY_CHARGED = "fully_charged"
-    # OUT_OF_LOGISTIC_NETWORK = "out_of_logistic_network"
+    OUT_OF_LOGISTIC_NETWORK = "out_of_logistic_network"
     NO_RECIPE = "no_recipe"
     NO_INGREDIENTS = "no_ingredients"
     NOT_CONNECTED = "not_connected"
@@ -80,15 +80,15 @@ class EntityStatus(Enum):
     WAITING_TO_LAUNCH_ROCKET = "waiting_to_launch_rocket"
     LAUNCHING_ROCKET = "launching_rocket"
     NO_MODULES_TO_TRANSMIT = "no_modules_to_transmit"
-    # RECHARGING_AFTER_POWER_OUTAGE = "recharging_after_power_outage"
-    # WAITING_FOR_TARGET_TO_BE_BUILT = "waiting_for_target_to_be_built"
-    # WAITING_FOR_TRAIN = "waiting_for_train"
+    RECHARGING_AFTER_POWER_OUTAGE = "recharging_after_power_outage"
+    WAITING_FOR_TARGET_TO_BE_BUILT = "waiting_for_target_to_be_built"
+    WAITING_FOR_TRAIN = "waiting_for_train"
     NO_AMMO = "no_ammo"
     LOW_TEMPERATURE = "low_temperature"
-    # DISABLED = "disabled"
-    # TURNED_OFF_DURING_DAYTIME = "turned_off_during_daytime"
+    DISABLED = "disabled"
+    TURNED_OFF_DURING_DAYTIME = "turned_off_during_daytime"
     NOT_CONNECTED_TO_RAIL = "not_connected_to_rail"
-    # CANT_DIVIDE_SEGMENTS = "cant_divide_segments"
+    CANT_DIVIDE_SEGMENTS = "cant_divide_segments"
 
     def __repr__(self):
         return f"EntityStatus.{self.name}"
@@ -112,6 +112,18 @@ class Inventory(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True, arbitrary_types_allowed=True, extra="allow"
     )
+
+    @model_validator(mode='before')
+    @classmethod
+    def _coerce_empty_list(cls, data):
+        """Lua serializes empty tables as [] (JSON array) instead of {} (object).
+        Coerce empty lists to empty dicts so Pydantic can construct the model."""
+        if isinstance(data, list):
+            if len(data) == 0:
+                return {}
+            # Non-empty list — shouldn't happen for inventories, but don't crash
+            return {}
+        return data
 
     # def __init__(self, **data):
     #     super().__init__()

@@ -164,9 +164,11 @@ class GetEntities(Tool):
                 entity_data["prototype"] = matching_prototype
 
                 # remove all empty values from the entity_data dictionary
+                # Preserve int(0) and empty lists (e.g. resources: []) which
+                # are falsy but semantically meaningful for Pydantic models.
                 entity_data = {
                     k: v for k, v in entity_data.items()
-                    if v or isinstance(v, int)
+                    if v or isinstance(v, (int, list))
                 }
 
                 try:
@@ -178,7 +180,7 @@ class GetEntities(Tool):
                             inventory_data = {
                                 k: v
                                 for k, v in entity_data["inventory"].items()
-                                if v or isinstance(v, int)
+                                if v or isinstance(v, (int, list))
                             }
                             entity_data["inventory"] = inventory_data
 
