@@ -194,6 +194,10 @@ local function has_output_space(entity)
 end
 
 local function has_electricity(entity)
+    -- Power producers (solar panels, generators) don't consume electricity — skip check
+    if entity.type == "solar-panel" or entity.type == "generator" then
+        return true
+    end
     if entity.prototype.electric_energy_source_prototype then
         -- Check if the entity is connected to an electric network
         if entity.electric_network_id then
@@ -352,7 +356,7 @@ function lacks_assembler_resources(entity)
             end
 
             if #missing_resources > 0 then
-                return "\'cannot create " .. recipe.name .. " due to missing resources: " .. table.concat(missing_resources, ",_").."\'"
+                return "\'cannot create " .. recipe.name .. " due to missing resources: " .. table.concat(missing_resources, "; ").."\'"
 
             end
         end

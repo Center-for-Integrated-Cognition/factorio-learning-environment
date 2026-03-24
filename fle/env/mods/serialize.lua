@@ -1121,6 +1121,10 @@ global.utils.serialize_entity = function(entity)
 
         -- Rolling average items-per-second from sampler.lua (transfer_count is items/tick)
         serialized.items_per_second = global.utils.get_sample_avg(entity, "transfer_count") * 60
+        -- MIN/MAX disabled: per-tick event counts produce misleading min=0/max=60 values.
+        -- Needs sub-window rate approach before re-enabling.
+        -- serialized.items_per_second_min = global.utils.get_sample_min(entity, "transfer_count") * 60
+        -- serialized.items_per_second_max = global.utils.get_sample_max(entity, "transfer_count") * 60
         -- Last item type transferred (stored by sampler's held_stack transition detector)
         local last_item = global.inserter_last_item and global.inserter_last_item[entity.unit_number]
         if last_item then
@@ -1173,6 +1177,8 @@ global.utils.serialize_entity = function(entity)
         serialized.fluidbox_id = entity.fluidbox.get_fluid_system_id(1)
         -- Use 5-second rolling average instead of instantaneous per-tick flow
         serialized.flow_rate = global.utils.get_sample_avg(entity, "fluidbox_flow_1")
+        -- serialized.flow_rate_min = global.utils.get_sample_min(entity, "fluidbox_flow_1")
+        -- serialized.flow_rate_max = global.utils.get_sample_max(entity, "fluidbox_flow_1")
     end
 
     -- Add input and output locations if the entity is a pipe-to-ground
@@ -1192,6 +1198,8 @@ global.utils.serialize_entity = function(entity)
         serialized.fluidbox_id = entity.fluidbox.get_fluid_system_id(1)
         -- Use 5-second rolling average instead of instantaneous per-tick flow
         serialized.flow_rate = global.utils.get_sample_avg(entity, "fluidbox_flow_1")
+        -- serialized.flow_rate_min = global.utils.get_sample_min(entity, "fluidbox_flow_1")
+        -- serialized.flow_rate_max = global.utils.get_sample_max(entity, "fluidbox_flow_1")
         serialized.contents = contents_count
         serialized.fluid = fluid_name
         --serialized.input_position = entity.fluidbox.get_connections(1)[1].position
@@ -1355,6 +1363,8 @@ global.utils.serialize_entity = function(entity)
 
         -- Rolling average items-per-second from sampler.lua (mining_output_count is completions/tick)
         serialized.mining_items_per_second = global.utils.get_sample_avg(entity, "mining_output_count") * 60
+        -- serialized.mining_items_per_second_min = global.utils.get_sample_min(entity, "mining_output_count") * 60
+        -- serialized.mining_items_per_second_max = global.utils.get_sample_max(entity, "mining_output_count") * 60
 
         -- Get the mining area
         local prototype = game.entity_prototypes[entity.name]
@@ -1524,6 +1534,10 @@ global.utils.serialize_entity = function(entity)
         -- Clamp averaged output to rated capacity and emit as energy_generated_last_tick
         -- so the Python side treats solar panels identically to generators.
         serialized.energy_generated_last_tick = math.min(avg_output, max_prod)
+        -- local min_output = global.utils.get_sample_min(entity, "electric_output_flow_limit")
+        -- local max_output = global.utils.get_sample_max(entity, "electric_output_flow_limit")
+        -- serialized.energy_generated_last_tick_min = math.min(min_output, max_prod)
+        -- serialized.energy_generated_last_tick_max = math.min(max_output, max_prod)
         serialized.max_power_output = max_prod
     end
 
@@ -1533,6 +1547,8 @@ global.utils.serialize_entity = function(entity)
         --serialized.emissions = entity.emissions
         -- Use 5-second rolling average instead of instantaneous buffer fill
         serialized.energy = global.utils.get_sample_avg(entity, "energy")
+        -- serialized.energy_min = global.utils.get_sample_min(entity, "energy")
+        -- serialized.energy_max = global.utils.get_sample_max(entity, "energy")
         -- Add max energy usage from prototype for consumption rate (static, no averaging needed)
         if entity.prototype and entity.prototype.max_energy_usage then
             serialized.max_energy_usage = entity.prototype.max_energy_usage
@@ -1543,6 +1559,8 @@ global.utils.serialize_entity = function(entity)
         serialized.connection_points = global.utils.get_generator_connection_positions(entity)
         -- Use 5-second rolling average instead of instantaneous per-tick output
         serialized.energy_generated_last_tick = global.utils.get_sample_avg(entity, "energy_generated_last_tick")
+        -- serialized.energy_generated_last_tick_min = global.utils.get_sample_min(entity, "energy_generated_last_tick")
+        -- serialized.energy_generated_last_tick_max = global.utils.get_sample_max(entity, "energy_generated_last_tick")
         -- Add prototype rate data for max capacity (static, no averaging needed)
         if entity.prototype then
             serialized.max_power_output = entity.prototype.max_power_output
@@ -1701,6 +1719,8 @@ global.utils.serialize_entity = function(entity)
         local util = global.utils.get_sample_avg(entity, "is_working")
         if util then
             serialized.utilization = util
+            -- serialized.utilization_min = global.utils.get_sample_min(entity, "is_working")
+            -- serialized.utilization_max = global.utils.get_sample_max(entity, "is_working")
         end
     end
 

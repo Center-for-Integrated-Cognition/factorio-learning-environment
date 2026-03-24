@@ -403,6 +403,50 @@ global.utils.get_sample_avg = function(entity, property)
     return avg
 end
 
+--- Return the minimum value within the rolling window for a given property.
+--- O(WINDOW_SIZE) scan — only called at serialization time, not per-tick.
+global.utils.get_sample_min = function(entity, property)
+    if not entity or not entity.valid or not entity.unit_number then return 0 end
+    local uid = entity.unit_number
+    if not global.energy_samples[uid] then
+        global.utils.register_for_sampling(entity)
+    end
+    local buf = global.energy_samples[uid]
+    if not buf or not buf[property] then return 0 end
+    local ring = buf[property]
+    local result = math.huge
+    for i = 1, WINDOW_SIZE do
+        local v = ring[i]
+        if v ~= nil and not is_huge(v) and v < result then
+            result = v
+        end
+    end
+    if result == math.huge then return 0 end
+    return result
+end
+
+--- Return the maximum value within the rolling window for a given property.
+--- O(WINDOW_SIZE) scan — only called at serialization time, not per-tick.
+global.utils.get_sample_max = function(entity, property)
+    if not entity or not entity.valid or not entity.unit_number then return 0 end
+    local uid = entity.unit_number
+    if not global.energy_samples[uid] then
+        global.utils.register_for_sampling(entity)
+    end
+    local buf = global.energy_samples[uid]
+    if not buf or not buf[property] then return 0 end
+    local ring = buf[property]
+    local result = -math.huge
+    for i = 1, WINDOW_SIZE do
+        local v = ring[i]
+        if v ~= nil and not is_huge(v) and v > result then
+            result = v
+        end
+    end
+    if result == -math.huge then return 0 end
+    return result
+end
+
 --- Update the is_working property for one entity in the ring buffer.
 --- Called from each entity-type loop in the tick handler.
 local function update_is_working(entity, uid, cursor)
@@ -622,6 +666,48 @@ script.on_nth_tick(1, function(event)
                         global.sample_running_sums[uid][prop] = (global.sample_running_sums[uid][prop] or 0) - old + flow
                     end
                 end
+            end
+        end
+    end
+
+    -- -----------------------------------------------------------------------
+    -- Global production flow tracking (force-level item + fluid statistics)
+    -- -----------------------------------------------------------------------
+    -- Reads the cumulative production/consumption counters from
+    -- game.forces.player.item_production_statistics and
+    -- game.forces.player.fluid_production_statistics, computes per-tick
+    -- deltas, and feeds them into the same ring-buffer / running-sum scheme
+    -- used for entity-level sampling.
+    local force = game.forces.player
+    local stats_sources = {
+        force.item_production_statistics,
+        force.fluid_production_statistics,
+    }
+    for _, stats in ipairs(stats_sources) do
+        -- Factorio naming: input_counts = items produced (input to the tracker),
+        --                  output_counts = items consumed (output from the tracker).
+        local mappings = {
+            { dir = "produced", counts = stats.input_counts },
+            { dir = "consumed", counts = stats.output_counts },
+        }
+        for _, m in ipairs(mappings) do
+            local dir = m.dir
+            for name, cumulative in pairs(m.counts) do
+                -- First time seeing this item: seed prev to current so delta=0
+                -- (avoids injecting the entire cumulative history as a spike)
+                local prev = global.production_flow_prev[dir][name] or cumulative
+                local delta = cumulative - prev
+                global.production_flow_prev[dir][name] = cumulative
+
+                -- Ensure ring buffer and running sum exist for this item/fluid
+                if not global.production_flow_ring[name] then
+                    global.production_flow_ring[name] = { produced = {}, consumed = {} }
+                    global.production_flow_sums[name] = { produced = 0, consumed = 0 }
+                end
+
+                local old = global.production_flow_ring[name][dir][cursor] or 0
+                global.production_flow_ring[name][dir][cursor] = delta
+                global.production_flow_sums[name][dir] = (global.production_flow_sums[name][dir] or 0) - old + delta
             end
         end
     end
