@@ -156,6 +156,8 @@ global.energy_samples = {}
 global.sample_cursor = 0
 global.sampled_entities = {}
 global.sample_running_sums = {}
+global.sample_prototype_data = {}  -- {uid -> {max_energy_usage, drain, fuel_value}}
+global.sample_network_id = {}      -- {uid -> electric_network_id}
 global.inserter_prev_held = {}
 global.inserter_last_item = {}
 global.drill_prev_progress = {}
@@ -369,6 +371,15 @@ global.utils.register_for_sampling = function(entity)
         -- Initialize previous mining_progress
         global.drill_prev_progress[uid] = entity.mining_progress or 0
     end
+    -- Electricity consumers get actual_power tracking (requested × satisfaction)
+    -- so min/max bounds capture the real variation the agent observes.
+    local has_eesp = false
+    pcall(function()
+        has_eesp = entity.prototype.electric_energy_source_prototype ~= nil
+    end)
+    if has_eesp then
+        props["actual_power"] = 0  -- filled each tick in the electricity pass
+    end
 
     global.sample_running_sums[uid] = {}
     for prop, val in pairs(props) do
@@ -378,6 +389,33 @@ global.utils.register_for_sampling = function(entity)
         end
         global.sample_running_sums[uid][prop] = val * WINDOW_SIZE
     end
+
+    -- Store prototype data needed for derived stats (power_consumption,
+    -- fuel_consumption_items).  We capture these at registration time so the
+    -- stats-computation functions do not need to look up the entity again.
+    local proto_data = { max_energy_usage = 0, drain = 0, fuel_value = 0 }
+    pcall(function()
+        if entity.prototype and entity.prototype.max_energy_usage then
+            proto_data.max_energy_usage = entity.prototype.max_energy_usage
+        end
+    end)
+    pcall(function()
+        local eesp = entity.prototype.electric_energy_source_prototype
+        if eesp and eesp.drain then proto_data.drain = eesp.drain end
+    end)
+    pcall(function()
+        if entity.burner and entity.burner.currently_burning then
+            proto_data.fuel_value = entity.burner.currently_burning.fuel_value or 0
+        end
+    end)
+    global.sample_prototype_data[uid] = proto_data
+
+    -- Store electric network ID for actual_power computation
+    pcall(function()
+        if entity.electric_network_id then
+            global.sample_network_id[uid] = entity.electric_network_id
+        end
+    end)
 end
 
 --- Get the rolling average for a property of an entity.
@@ -400,6 +438,8 @@ global.utils.get_sample_avg = function(entity, property)
     if is_huge(avg) then
         return 0
     end
+    -- Eliminate IEEE -0.0 from running-sum drift (e.g. idle entities)
+    if avg == 0 then return 0 end
     return avg
 end
 
@@ -444,6 +484,334 @@ global.utils.get_sample_max = function(entity, property)
         end
     end
     if result == -math.huge then return 0 end
+    return result
+end
+
+--- Dump the entire ring buffer for all registered entities and properties.
+--- Returns a table keyed by unit_number, then by property name, containing
+--- an array of all WINDOW_SIZE raw per-tick values ordered oldest→newest.
+--- Intended for use by the export script (via RCON) to compute true min/max
+--- bounds over the full buffer — NOT used during normal agent operation.
+---
+--- Usage from RCON / export script:
+---   /sc rcon.print(game.table_to_json(global.utils.dump_all_sample_buffers()))
+---
+--- The returned table also includes metadata:
+---   ._window_size = current WINDOW_SIZE
+---   ._cursor      = current cursor position (1-indexed)
+global.utils.dump_all_sample_buffers = function()
+    local result = {
+        _window_size = WINDOW_SIZE,
+        _cursor = global.sample_cursor,
+    }
+    for uid, props in pairs(global.energy_samples) do
+        result[tostring(uid)] = {}
+        for prop, buf in pairs(props) do
+            -- Read the ring buffer in chronological order (oldest → newest).
+            -- The cursor points to the most recently written slot, so the
+            -- oldest slot is cursor+1 (wrapping around).
+            local ordered = {}
+            for i = 1, WINDOW_SIZE do
+                local idx = ((global.sample_cursor + i - 1) % WINDOW_SIZE) + 1
+                ordered[i] = buf[idx] or 0
+            end
+            result[tostring(uid)][prop] = ordered
+        end
+    end
+    return result
+end
+
+--- Dump the ring buffer for a single entity (by unit_number).
+--- Same format as dump_all_sample_buffers but for one entity only.
+--- Usage: /sc rcon.print(game.table_to_json(global.utils.dump_sample_buffer(166)))
+global.utils.dump_sample_buffer = function(uid)
+    local result = {
+        _window_size = WINDOW_SIZE,
+        _cursor = global.sample_cursor,
+    }
+    local props = global.energy_samples[uid]
+    if not props then return result end
+    for prop, buf in pairs(props) do
+        local ordered = {}
+        for i = 1, WINDOW_SIZE do
+            local idx = ((global.sample_cursor + i - 1) % WINDOW_SIZE) + 1
+            ordered[i] = buf[idx] or 0
+        end
+        result[prop] = ordered
+    end
+    return result
+end
+
+--- Compute per-entity, per-property statistics (min, max, sum, count)
+--- directly in Lua, avoiding the massive JSON serialization of raw buffers.
+--- Returns {uid_str: {prop: {min=, max=, mean=, count=, n_unique=}}, _window_size=}
+---
+--- Usage: /sc rcon.print(game.table_to_json(global.utils.compute_buffer_stats()))
+global.utils.compute_buffer_stats = function()
+    local result = { _window_size = WINDOW_SIZE }
+    for uid, props in pairs(global.energy_samples) do
+        local entity_stats = {}
+        for prop, buf in pairs(props) do
+            local vmin = math.huge
+            local vmax = -math.huge
+            local vsum = 0
+            local seen = {}
+            local n_unique = 0
+            for i = 1, WINDOW_SIZE do
+                local v = buf[i] or 0
+                if v < vmin then vmin = v end
+                if v > vmax then vmax = v end
+                vsum = vsum + v
+                if not seen[v] then
+                    seen[v] = true
+                    n_unique = n_unique + 1
+                end
+            end
+            entity_stats[prop] = {
+                min = vmin,
+                max = vmax,
+                mean = vsum / WINDOW_SIZE,
+                count = WINDOW_SIZE,
+                n_unique = n_unique,
+            }
+        end
+        -- Derive power_consumption and fuel_consumption_items from is_working
+        if props["is_working"] then
+            local pd = global.sample_prototype_data[uid]
+            if pd and pd.max_energy_usage > 0 then
+                local rated = pd.max_energy_usage  -- J/tick
+                local drain = pd.drain or 0
+                local iw_buf = props["is_working"]
+
+                -- power_consumption: for electric consumers
+                local pc_min = math.huge
+                local pc_max = -math.huge
+                local pc_sum = 0
+                for i = 1, WINDOW_SIZE do
+                    local iw = iw_buf[i] or 0
+                    local pc = drain + (rated - drain) * iw
+                    if pc < pc_min then pc_min = pc end
+                    if pc > pc_max then pc_max = pc end
+                    pc_sum = pc_sum + pc
+                end
+                entity_stats["power_consumption"] = {
+                    min = pc_min,
+                    max = pc_max,
+                    mean = pc_sum / WINDOW_SIZE,
+                    count = WINDOW_SIZE,
+                    n_unique = entity_stats["is_working"] and entity_stats["is_working"].n_unique or 1,
+                }
+
+                -- fuel_consumption_items: for burner entities (boilers, etc.)
+                if pd.fuel_value and pd.fuel_value > 0 then
+                    local items_per_tick = rated / pd.fuel_value
+                    local fc_min = math.huge
+                    local fc_max = -math.huge
+                    local fc_sum = 0
+                    for i = 1, WINDOW_SIZE do
+                        local iw = iw_buf[i] or 0
+                        local fc = items_per_tick * iw
+                        if fc < fc_min then fc_min = fc end
+                        if fc > fc_max then fc_max = fc end
+                        fc_sum = fc_sum + fc
+                    end
+                    entity_stats["fuel_consumption_items"] = {
+                        min = fc_min,
+                        max = fc_max,
+                        mean = fc_sum / WINDOW_SIZE,
+                        count = WINDOW_SIZE,
+                        n_unique = entity_stats["is_working"] and entity_stats["is_working"].n_unique or 1,
+                    }
+                end
+            end
+        end
+        result[tostring(uid)] = entity_stats
+    end
+    return result
+end
+
+--- Compute min/max of a sliding-window average over the ring buffer.
+--- window_ticks: the agent's sampler window width in ticks.
+--- The ring buffer must be larger than window_ticks (use set_sampler_window_size
+--- to grow it before recording).
+---
+--- For each property, slides a window of window_ticks across the buffer
+--- (in chronological order), maintaining a running sum.  Returns the
+--- minimum and maximum window-average observed, plus the overall mean.
+---
+--- O(WINDOW_SIZE) per property — O(1) per tick position.
+---
+--- Usage: /sc rcon.print(game.table_to_json(global.utils.compute_sliding_window_stats(600)))
+global.utils.compute_sliding_window_stats = function(window_ticks)
+    local result = { _window_size = WINDOW_SIZE, _sliding_window = window_ticks }
+    local cursor = global.sample_cursor
+    for uid, props in pairs(global.energy_samples) do
+        local entity_stats = {}
+        for prop, buf in pairs(props) do
+            -- Read buffer in chronological order into a flat array
+            local vals = {}
+            local total_sum = 0
+            local seen = {}
+            local n_unique = 0
+            for i = 1, WINDOW_SIZE do
+                local idx = ((cursor + i - 1) % WINDOW_SIZE) + 1
+                local v = buf[idx] or 0
+                vals[i] = v
+                total_sum = total_sum + v
+                if not seen[v] then
+                    seen[v] = true
+                    n_unique = n_unique + 1
+                end
+            end
+            if WINDOW_SIZE < window_ticks then
+                -- Not enough data; return whole-buffer stats
+                local vmin = math.huge
+                local vmax = -math.huge
+                for i = 1, WINDOW_SIZE do
+                    if vals[i] < vmin then vmin = vals[i] end
+                    if vals[i] > vmax then vmax = vals[i] end
+                end
+                entity_stats[prop] = {
+                    min = vmin,
+                    max = vmax,
+                    mean = total_sum / WINDOW_SIZE,
+                    count = WINDOW_SIZE,
+                    n_unique = n_unique,
+                }
+            else
+                -- First window sum
+                local win_sum = 0
+                for i = 1, window_ticks do
+                    win_sum = win_sum + vals[i]
+                end
+                local win_avg = win_sum / window_ticks
+                local min_avg = win_avg
+                local max_avg = win_avg
+                -- Slide
+                for i = window_ticks + 1, WINDOW_SIZE do
+                    win_sum = win_sum + vals[i] - vals[i - window_ticks]
+                    win_avg = win_sum / window_ticks
+                    if win_avg < min_avg then min_avg = win_avg end
+                    if win_avg > max_avg then max_avg = win_avg end
+                end
+                entity_stats[prop] = {
+                    sliding_min = min_avg,
+                    sliding_max = max_avg,
+                    mean = total_sum / WINDOW_SIZE,
+                    count = WINDOW_SIZE,
+                    n_unique = n_unique,
+                }
+            end
+        end
+        -- Derive power_consumption and fuel_consumption_items sliding-window stats from is_working
+        -- Derive power_consumption and fuel_consumption_items from is_working
+        if props["is_working"] then
+            local pd = global.sample_prototype_data[uid]
+            if pd and pd.max_energy_usage > 0 then
+                local rated = pd.max_energy_usage
+                local drain = pd.drain or 0
+                local iw_buf = props["is_working"]
+
+                -- power_consumption: for electric consumers
+                local pc_vals = {}
+                local pc_total = 0
+                for i = 1, WINDOW_SIZE do
+                    local idx = ((cursor + i - 1) % WINDOW_SIZE) + 1
+                    local iw = iw_buf[idx] or 0
+                    local pc = drain + (rated - drain) * iw
+                    pc_vals[i] = pc
+                    pc_total = pc_total + pc
+                end
+                if WINDOW_SIZE < window_ticks then
+                    local pc_min = math.huge
+                    local pc_max = -math.huge
+                    for i = 1, WINDOW_SIZE do
+                        if pc_vals[i] < pc_min then pc_min = pc_vals[i] end
+                        if pc_vals[i] > pc_max then pc_max = pc_vals[i] end
+                    end
+                    entity_stats["power_consumption"] = {
+                        min = pc_min,
+                        max = pc_max,
+                        mean = pc_total / WINDOW_SIZE,
+                        count = WINDOW_SIZE,
+                        n_unique = entity_stats["is_working"] and entity_stats["is_working"].n_unique or 1,
+                    }
+                else
+                    local win_sum = 0
+                    for i = 1, window_ticks do
+                        win_sum = win_sum + pc_vals[i]
+                    end
+                    local win_avg = win_sum / window_ticks
+                    local min_avg = win_avg
+                    local max_avg = win_avg
+                    for i = window_ticks + 1, WINDOW_SIZE do
+                        win_sum = win_sum + pc_vals[i] - pc_vals[i - window_ticks]
+                        win_avg = win_sum / window_ticks
+                        if win_avg < min_avg then min_avg = win_avg end
+                        if win_avg > max_avg then max_avg = win_avg end
+                    end
+                    entity_stats["power_consumption"] = {
+                        sliding_min = min_avg,
+                        sliding_max = max_avg,
+                        mean = pc_total / WINDOW_SIZE,
+                        count = WINDOW_SIZE,
+                        n_unique = entity_stats["is_working"] and entity_stats["is_working"].n_unique or 1,
+                    }
+                end
+
+                -- fuel_consumption_items: for burner entities (boilers, etc.)
+                if pd.fuel_value and pd.fuel_value > 0 then
+                    local items_per_tick = rated / pd.fuel_value
+                    local fc_vals = {}
+                    local fc_total = 0
+                    for i = 1, WINDOW_SIZE do
+                        local idx = ((cursor + i - 1) % WINDOW_SIZE) + 1
+                        local iw = iw_buf[idx] or 0
+                        local fc = items_per_tick * iw
+                        fc_vals[i] = fc
+                        fc_total = fc_total + fc
+                    end
+                    if WINDOW_SIZE < window_ticks then
+                        local fc_min = math.huge
+                        local fc_max = -math.huge
+                        for i = 1, WINDOW_SIZE do
+                            if fc_vals[i] < fc_min then fc_min = fc_vals[i] end
+                            if fc_vals[i] > fc_max then fc_max = fc_vals[i] end
+                        end
+                        entity_stats["fuel_consumption_items"] = {
+                            min = fc_min,
+                            max = fc_max,
+                            mean = fc_total / WINDOW_SIZE,
+                            count = WINDOW_SIZE,
+                            n_unique = entity_stats["is_working"] and entity_stats["is_working"].n_unique or 1,
+                        }
+                    else
+                        local win_sum = 0
+                        for i = 1, window_ticks do
+                            win_sum = win_sum + fc_vals[i]
+                        end
+                        local win_avg = win_sum / window_ticks
+                        local fc_min_avg = win_avg
+                        local fc_max_avg = win_avg
+                        for i = window_ticks + 1, WINDOW_SIZE do
+                            win_sum = win_sum + fc_vals[i] - fc_vals[i - window_ticks]
+                            win_avg = win_sum / window_ticks
+                            if win_avg < fc_min_avg then fc_min_avg = win_avg end
+                            if win_avg > fc_max_avg then fc_max_avg = win_avg end
+                        end
+                        entity_stats["fuel_consumption_items"] = {
+                            sliding_min = fc_min_avg,
+                            sliding_max = fc_max_avg,
+                            mean = fc_total / WINDOW_SIZE,
+                            count = WINDOW_SIZE,
+                            n_unique = entity_stats["is_working"] and entity_stats["is_working"].n_unique or 1,
+                        }
+                    end
+                end
+            end
+        end
+        result[tostring(uid)] = entity_stats
+    end
     return result
 end
 
@@ -667,6 +1035,77 @@ script.on_nth_tick(1, function(event)
                     end
                 end
             end
+        end
+    end
+
+    -- -----------------------------------------------------------------------
+    -- Electricity actual_power pass: compute per-tick actual power for each
+    -- electric consumer using the same formula the agent observes:
+    --   actual_power = (drain + (max - drain) × is_working) × satisfaction
+    -- where satisfaction = min(total_production / total_demand, 1).
+    -- We group by electric_network_id to handle multiple independent grids.
+    -- -----------------------------------------------------------------------
+    -- Collect per-network production and per-consumer demand this tick
+    local net_production = {}  -- network_id → total J/tick produced this tick
+    local net_demand = {}      -- network_id → total J/tick demanded this tick
+    local consumer_tick_data = {} -- list of {uid, net_id, requested}
+
+    -- Sum generator production (already sampled above)
+    for _, entity in pairs(surface.find_entities_filtered{type="generator", force="player"}) do
+        if entity.valid and entity.electric_network_id then
+            local nid = entity.electric_network_id
+            net_production[nid] = (net_production[nid] or 0) + (entity.energy_generated_last_tick or 0)
+        end
+    end
+    -- Sum solar production
+    for _, entity in pairs(surface.find_entities_filtered{type="solar-panel", force="player"}) do
+        if entity.valid and entity.electric_network_id then
+            local nid = entity.electric_network_id
+            local val = entity.electric_output_flow_limit or 0
+            if is_huge(val) then val = get_solar_max_production(entity) end
+            net_production[nid] = (net_production[nid] or 0) + val
+        end
+    end
+
+    -- Compute each consumer's requested power this tick and sum per-network demand
+    for uid, pd in pairs(global.sample_prototype_data) do
+        if pd.max_energy_usage > 0 then
+            local s = global.energy_samples[uid]
+            if s and s["actual_power"] then
+                -- Get this tick's is_working value (just written above)
+                local iw = 0
+                if s["is_working"] then
+                    iw = s["is_working"][cursor] or 0
+                end
+                local requested = pd.drain + (pd.max_energy_usage - pd.drain) * iw
+                -- Find network id from sampled_entities
+                -- We stored it during registration or can look up now
+                local nid = global.sample_network_id[uid]
+                if nid then
+                    net_demand[nid] = (net_demand[nid] or 0) + requested
+                    consumer_tick_data[#consumer_tick_data + 1] = {
+                        uid = uid, nid = nid, requested = requested,
+                    }
+                end
+            end
+        end
+    end
+
+    -- Compute satisfaction per network and write actual_power to ring buffer
+    for _, cd in ipairs(consumer_tick_data) do
+        local production = net_production[cd.nid] or 0
+        local demand = net_demand[cd.nid] or 0
+        local satisfaction = 1.0
+        if demand > 0 then
+            satisfaction = math.min(production / demand, 1.0)
+        end
+        local actual = cd.requested * satisfaction
+        local s = global.energy_samples[cd.uid]
+        if s and s["actual_power"] then
+            local old = s["actual_power"][cursor] or 0
+            s["actual_power"][cursor] = actual
+            global.sample_running_sums[cd.uid]["actual_power"] =
+                (global.sample_running_sums[cd.uid]["actual_power"] or 0) - old + actual
         end
     end
 
