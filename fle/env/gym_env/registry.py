@@ -141,7 +141,7 @@ def make_factorio_env(spec: GymEnvironmentSpec, run_idx: int, **kwargs) -> Facto
             instance = FactorioInstance(**common_kwargs, clear_entities=(not keep_entities))
 
         # Set initial speed and unpause
-        instance.set_speed_and_unpause(10)
+        instance.set_speed_and_unpause(100)
 
         # Setup the task
         task.setup(instance)

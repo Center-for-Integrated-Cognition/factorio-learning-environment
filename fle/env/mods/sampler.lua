@@ -826,6 +826,176 @@ local function update_is_working(entity, uid, cursor)
     global.sample_running_sums[uid]["is_working"] = (global.sample_running_sums[uid]["is_working"] or 0) - old + new
 end
 
+-- ---------------------------------------------------------------------------
+-- Cached entity tracker (replaces per-tick find_entities_filtered scans).
+-- ---------------------------------------------------------------------------
+-- global.tracked_entities[category] = { [unit_number] = entity, ... }
+--
+-- Categories match the buckets the tick handler iterates: one bucket per
+-- find_entities_filtered call we replaced.  An entity may appear in more
+-- than one bucket (e.g. a boiler is in 'fluid' AND 'crafting' for is_working,
+-- a generator is in 'generator' for energy AND 'fluid' for fluidbox).
+--
+-- Membership is maintained incrementally via Factorio build/destroy events.
+-- A bootstrap scan runs on the first tick to pick up entities that already
+-- existed at scenario load (e.g. via add_entities / blueprints).
+--
+-- Categories:
+--   accumulator   - type=accumulator
+--   generator     - type=generator
+--   solar         - type=solar-panel
+--   inserter      - type=inserter
+--   drill         - type=mining-drill
+--   pipe          - type=pipe / pipe-to-ground
+--   crafting      - type in CRAFTING_ENTITY_TYPES (assembling-machine, furnace, lab, ...)
+--   fluid         - any of {assembling-machine, mining-drill, boiler, generator,
+--                            offshore-pump, storage-tank, furnace} (for fluidbox loop)
+-- ---------------------------------------------------------------------------
+global.tracked_entities = global.tracked_entities or {
+    accumulator = {},
+    generator   = {},
+    solar       = {},
+    inserter    = {},
+    drill       = {},
+    pipe        = {},
+    crafting    = {},
+    fluid       = {},
+}
+
+-- Set of crafting entity types for fast lookup (used by classifier below).
+local CRAFTING_TYPE_SET = {}
+for _, t in ipairs(CRAFTING_ENTITY_TYPES) do CRAFTING_TYPE_SET[t] = true end
+
+-- Set of fluid-loop entity types (must match the tick handler's old list).
+local FLUID_ENTITY_TYPE_SET = {
+    ["assembling-machine"] = true,
+    ["mining-drill"]       = true,
+    ["boiler"]             = true,
+    ["generator"]          = true,
+    ["offshore-pump"]      = true,
+    ["storage-tank"]       = true,
+    ["furnace"]            = true,
+}
+
+--- Add an entity to all tracker buckets it qualifies for.
+--- Idempotent: re-adding the same uid is a no-op (overwrites with same entity ref).
+local function tracker_add(entity)
+    if not entity or not entity.valid or not entity.unit_number then return end
+    if entity.force and entity.force.name ~= "player" then return end
+    local uid = entity.unit_number
+    local etype = entity.type
+    local te = global.tracked_entities
+
+    if etype == "accumulator" then te.accumulator[uid] = entity end
+    if etype == "generator"   then te.generator[uid]   = entity end
+    if etype == "solar-panel" then te.solar[uid]       = entity end
+    if etype == "inserter"    then te.inserter[uid]    = entity end
+    if etype == "mining-drill" then te.drill[uid]      = entity end
+    if etype == "pipe" or etype == "pipe-to-ground" then te.pipe[uid] = entity end
+    if CRAFTING_TYPE_SET[etype] then te.crafting[uid]  = entity end
+    if FLUID_ENTITY_TYPE_SET[etype] then te.fluid[uid] = entity end
+end
+
+--- Remove an entity from all tracker buckets.
+local function tracker_remove(uid)
+    if not uid then return end
+    local te = global.tracked_entities
+    te.accumulator[uid] = nil
+    te.generator[uid]   = nil
+    te.solar[uid]       = nil
+    te.inserter[uid]    = nil
+    te.drill[uid]       = nil
+    te.pipe[uid]        = nil
+    te.crafting[uid]    = nil
+    te.fluid[uid]       = nil
+end
+
+-- One-time bootstrap on first tick: scan the surface and populate the tracker
+-- with any entities that already exist (placed via add_entities at scenario
+-- load, blueprints applied before our event handlers were registered, etc.).
+-- Cleared after running once.  Set true on every load so reloads still scan.
+global.tracker_needs_bootstrap = true
+
+local function tracker_bootstrap()
+    local surface = game.surfaces[1]
+    if not surface then return end
+    -- One broad scan covering every type we care about.  This is a single
+    -- O(surface) call paid once, replacing 10+ per-tick scans forever.
+    local types = {
+        "accumulator", "generator", "solar-panel", "inserter", "mining-drill",
+        "pipe", "pipe-to-ground",
+        "assembling-machine", "furnace", "lab", "rocket-silo", "reactor",
+        "beacon", "boiler", "offshore-pump", "storage-tank",
+    }
+    for _, e in pairs(surface.find_entities_filtered{type=types, force="player"}) do
+        tracker_add(e)
+    end
+    global.tracker_needs_bootstrap = false
+end
+
+-- Build/destroy event hooks to keep the tracker in sync.
+-- Use a filter so we only get events for types we care about.
+local TRACKED_FILTER = {
+    {filter="type", type="accumulator"},
+    {filter="type", type="generator"},
+    {filter="type", type="solar-panel"},
+    {filter="type", type="inserter"},
+    {filter="type", type="mining-drill"},
+    {filter="type", type="pipe"},
+    {filter="type", type="pipe-to-ground"},
+    {filter="type", type="assembling-machine"},
+    {filter="type", type="furnace"},
+    {filter="type", type="lab"},
+    {filter="type", type="rocket-silo"},
+    {filter="type", type="reactor"},
+    {filter="type", type="beacon"},
+    {filter="type", type="boiler"},
+    {filter="type", type="offshore-pump"},
+    {filter="type", type="storage-tank"},
+}
+
+local BUILD_EVENTS = {
+    defines.events.on_built_entity,
+    defines.events.on_robot_built_entity,
+    defines.events.script_raised_built,
+    defines.events.script_raised_revive,
+}
+local DESTROY_EVENTS = {
+    defines.events.on_entity_died,
+    defines.events.on_player_mined_entity,
+    defines.events.on_robot_mined_entity,
+    defines.events.script_raised_destroy,
+}
+
+local function on_tracked_built(event)
+    local e = event.created_entity or event.entity
+    if e then tracker_add(e) end
+end
+
+local function on_tracked_destroyed(event)
+    local e = event.entity
+    if e and e.unit_number then
+        tracker_remove(e.unit_number)
+        -- Also free per-entity sampler state so we don't leak memory.
+        local uid = e.unit_number
+        global.energy_samples[uid] = nil
+        global.sample_running_sums[uid] = nil
+        global.sample_prototype_data[uid] = nil
+        global.sample_network_id[uid] = nil
+        global.sampled_entities[uid] = nil
+        global.inserter_prev_held[uid] = nil
+        global.inserter_last_item[uid] = nil
+        global.drill_prev_progress[uid] = nil
+    end
+end
+
+for _, ev in ipairs(BUILD_EVENTS) do
+    pcall(function() script.on_event(ev, on_tracked_built, TRACKED_FILTER) end)
+end
+for _, ev in ipairs(DESTROY_EVENTS) do
+    pcall(function() script.on_event(ev, on_tracked_destroyed, TRACKED_FILTER) end)
+end
+
 --- The tick handler: sample all registered entities.
 --- Uses script.on_nth_tick(1, ...) which is independent of
 --- script.on_event(defines.events.on_tick, ...) used by alerts.lua and utils.lua.
@@ -834,6 +1004,11 @@ end
 --- accumulators, generators, solar panels, pipes, and fluid-processing
 --- buildings (assembling-machines, mining-drills, boilers, etc.).
 script.on_nth_tick(1, function(event)
+    -- Calibration short-circuit: when set via RCON
+    --   /sc global.sampler_disabled = true
+    -- the per-tick sampling loop becomes a no-op so external callers can
+    -- measure raw engine UPS vs sampled UPS and back-calculate sampler cost.
+    if global.sampler_disabled then return end
     -- Advance the ring buffer cursor (1-indexed, wraps around WINDOW_SIZE)
     global.sample_cursor = (global.sample_cursor % WINDOW_SIZE) + 1
     local cursor = global.sample_cursor
@@ -841,10 +1016,19 @@ script.on_nth_tick(1, function(event)
     local surface = game.surfaces[1]
     if not surface then return end
 
+    -- One-time tracker bootstrap (entities present at scenario load).
+    if global.tracker_needs_bootstrap then
+        tracker_bootstrap()
+    end
+
+    -- Per-network production accumulator for the actual_power pass below.
+    -- Filled in-place during the generator/solar loops to avoid a second
+    -- find_entities_filtered scan per tick.
+    local net_production = {}  -- network_id -> J/tick
+
     -- Sample accumulators
-    for _, entity in pairs(surface.find_entities_filtered{type="accumulator", force="player"}) do
-        if entity.valid and entity.unit_number then
-            local uid = entity.unit_number
+    for uid, entity in pairs(global.tracked_entities.accumulator) do
+        if entity.valid then
             if not global.energy_samples[uid] then
                 global.utils.register_for_sampling(entity)
             end
@@ -860,59 +1044,64 @@ script.on_nth_tick(1, function(event)
     end
 
     -- Sample generators
-    for _, entity in pairs(surface.find_entities_filtered{type="generator", force="player"}) do
-        if entity.valid and entity.unit_number then
-            local uid = entity.unit_number
+    for uid, entity in pairs(global.tracked_entities.generator) do
+        if entity.valid then
             if not global.energy_samples[uid] then
                 global.utils.register_for_sampling(entity)
             end
             local s = global.energy_samples[uid]
+            local egen = entity.energy_generated_last_tick or 0
             if s and s["energy_generated_last_tick"] then
                 local old = s["energy_generated_last_tick"][cursor] or 0
-                local new = entity.energy_generated_last_tick or 0
-                s["energy_generated_last_tick"][cursor] = new
-                global.sample_running_sums[uid]["energy_generated_last_tick"] = (global.sample_running_sums[uid]["energy_generated_last_tick"] or 0) - old + new
+                s["energy_generated_last_tick"][cursor] = egen
+                global.sample_running_sums[uid]["energy_generated_last_tick"] = (global.sample_running_sums[uid]["energy_generated_last_tick"] or 0) - old + egen
+            end
+            -- Accumulate per-network production for actual_power pass.
+            local nid = entity.electric_network_id
+            if nid then
+                net_production[nid] = (net_production[nid] or 0) + egen
             end
             update_is_working(entity, uid, cursor)
         end
     end
 
     -- Sample solar panels
-    for _, entity in pairs(surface.find_entities_filtered{type="solar-panel", force="player"}) do
-        if entity.valid and entity.unit_number then
-            local uid = entity.unit_number
+    for uid, entity in pairs(global.tracked_entities.solar) do
+        if entity.valid then
             if not global.energy_samples[uid] then
                 global.utils.register_for_sampling(entity)
             end
             local s = global.energy_samples[uid]
+            local val = entity.electric_output_flow_limit or 0
+            -- Factorio may return math.huge OR DBL_MAX (~1.798e+308) when
+            -- the network doesn't constrain the panel.  Clamp to rated max.
+            if is_huge(val) then
+                val = get_solar_max_production(entity)
+            end
             if s and s["electric_output_flow_limit"] then
-                local new = entity.electric_output_flow_limit or 0
-                -- Factorio may return math.huge OR DBL_MAX (~1.798e+308) when
-                -- the network doesn't constrain the panel.  Clamp to rated max.
-                if is_huge(new) then
-                    new = get_solar_max_production(entity)
-                end
                 local old = s["electric_output_flow_limit"][cursor] or 0
-                -- Clamp stale huge values left in the buffer
                 if is_huge(old) then
                     old = 0
                 end
-                s["electric_output_flow_limit"][cursor] = new
-                local sum = (global.sample_running_sums[uid]["electric_output_flow_limit"] or 0) - old + new
-                -- Guard against corrupted running sum
+                s["electric_output_flow_limit"][cursor] = val
+                local sum = (global.sample_running_sums[uid]["electric_output_flow_limit"] or 0) - old + val
                 if is_huge(sum) then
-                    sum = new * WINDOW_SIZE
+                    sum = val * WINDOW_SIZE
                 end
                 global.sample_running_sums[uid]["electric_output_flow_limit"] = sum
+            end
+            -- Accumulate per-network production for actual_power pass.
+            local nid = entity.electric_network_id
+            if nid then
+                net_production[nid] = (net_production[nid] or 0) + val
             end
             update_is_working(entity, uid, cursor)
         end
     end
 
     -- Sample inserters: detect held_stack transitions (item held → empty = completed transfer)
-    for _, entity in pairs(surface.find_entities_filtered{type="inserter", force="player"}) do
-        if entity.valid and entity.unit_number then
-            local uid = entity.unit_number
+    for uid, entity in pairs(global.tracked_entities.inserter) do
+        if entity.valid then
             if not global.energy_samples[uid] then
                 global.utils.register_for_sampling(entity)
             end
@@ -946,9 +1135,8 @@ script.on_nth_tick(1, function(event)
     end
 
     -- Sample mining drills: detect mining_progress wrap-arounds (cycle completion)
-    for _, entity in pairs(surface.find_entities_filtered{type="mining-drill", force="player"}) do
-        if entity.valid and entity.unit_number then
-            local uid = entity.unit_number
+    for uid, entity in pairs(global.tracked_entities.drill) do
+        if entity.valid then
             if not global.energy_samples[uid] then
                 global.utils.register_for_sampling(entity)
             end
@@ -978,9 +1166,8 @@ script.on_nth_tick(1, function(event)
     -- Pipes are the most common and always have exactly one slot, so we
     -- handle them with a direct property write (no inner loop) for speed.
     -- All other fluid-processing entity types use a generic N-slot loop.
-    for _, entity in pairs(surface.find_entities_filtered{type={"pipe", "pipe-to-ground"}, force="player"}) do
-        if entity.valid and entity.unit_number and entity.fluidbox and #entity.fluidbox > 0 then
-            local uid = entity.unit_number
+    for uid, entity in pairs(global.tracked_entities.pipe) do
+        if entity.valid and entity.fluidbox and #entity.fluidbox > 0 then
             if not global.energy_samples[uid] then
                 global.utils.register_for_sampling(entity)
             end
@@ -998,27 +1185,19 @@ script.on_nth_tick(1, function(event)
 
     -- Sample crafting entities (assembling machines, furnaces, labs, etc.) for utilization only.
     -- These entity types don't have a type-specific metric sampled above, so we only track is_working.
-    for _, etype in ipairs(CRAFTING_ENTITY_TYPES) do
-        for _, entity in pairs(surface.find_entities_filtered{type=etype, force="player"}) do
-            if entity.valid and entity.unit_number then
-                local uid = entity.unit_number
-                if not global.energy_samples[uid] then
-                    global.utils.register_for_sampling(entity)
-                end
-                update_is_working(entity, uid, cursor)
+    for uid, entity in pairs(global.tracked_entities.crafting) do
+        if entity.valid then
+            if not global.energy_samples[uid] then
+                global.utils.register_for_sampling(entity)
             end
+            update_is_working(entity, uid, cursor)
         end
     end
 
     -- Fluid-processing buildings: assembling-machine (oil-refinery,
     -- chemical-plant), mining-drill (pumpjack), boiler, generator, etc.
-    local fluid_entity_types = {
-        "assembling-machine", "mining-drill", "boiler", "generator",
-        "offshore-pump", "storage-tank", "furnace"
-    }
-    for _, entity in pairs(surface.find_entities_filtered{type=fluid_entity_types, force="player"}) do
-        if entity.valid and entity.unit_number and entity.fluidbox and #entity.fluidbox > 0 then
-            local uid = entity.unit_number
+    for uid, entity in pairs(global.tracked_entities.fluid) do
+        if entity.valid and entity.fluidbox and #entity.fluidbox > 0 then
             if not global.energy_samples[uid] then
                 global.utils.register_for_sampling(entity)
             end
@@ -1044,28 +1223,13 @@ script.on_nth_tick(1, function(event)
     --   actual_power = (drain + (max - drain) × is_working) × satisfaction
     -- where satisfaction = min(total_production / total_demand, 1).
     -- We group by electric_network_id to handle multiple independent grids.
+    --
+    -- net_production was already filled in-place during the generator and
+    -- solar loops above (no extra find_entities_filtered scans needed here).
     -- -----------------------------------------------------------------------
-    -- Collect per-network production and per-consumer demand this tick
-    local net_production = {}  -- network_id → total J/tick produced this tick
+    -- Collect per-consumer demand this tick
     local net_demand = {}      -- network_id → total J/tick demanded this tick
     local consumer_tick_data = {} -- list of {uid, net_id, requested}
-
-    -- Sum generator production (already sampled above)
-    for _, entity in pairs(surface.find_entities_filtered{type="generator", force="player"}) do
-        if entity.valid and entity.electric_network_id then
-            local nid = entity.electric_network_id
-            net_production[nid] = (net_production[nid] or 0) + (entity.energy_generated_last_tick or 0)
-        end
-    end
-    -- Sum solar production
-    for _, entity in pairs(surface.find_entities_filtered{type="solar-panel", force="player"}) do
-        if entity.valid and entity.electric_network_id then
-            local nid = entity.electric_network_id
-            local val = entity.electric_output_flow_limit or 0
-            if is_huge(val) then val = get_solar_max_production(entity) end
-            net_production[nid] = (net_production[nid] or 0) + val
-        end
-    end
 
     -- Compute each consumer's requested power this tick and sum per-network demand
     for uid, pd in pairs(global.sample_prototype_data) do

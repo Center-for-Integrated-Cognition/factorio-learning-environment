@@ -169,7 +169,7 @@ class FactorioInstance:
         clear_entities=True,
         peaceful=True,
         num_agents=1,
-        reset_speed=10,
+        reset_speed=100,
         reset_paused=False,
         **kwargs,
     ):
