@@ -1,7 +1,7 @@
 import math
 from typing import Tuple, Any, Union, Dict, Literal
 from typing import List, Optional
-from enum import Enum, IntFlag
+from enum import Enum, IntFlag, StrEnum
 from pydantic import ConfigDict, BaseModel, model_validator, model_serializer
 
 
@@ -457,6 +457,10 @@ class BurnerType(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     fuel: Inventory = Inventory()  # Use this to check the fuel levels of the entity
 
+class WireColor(StrEnum):
+    """Choice of wire color, can be red or green"""
+    RED = "red"
+    GREEN = "green"
 
 class EntityCore(BaseModel):
     # id: Optional[str] = None
@@ -615,6 +619,14 @@ class Accumulator(StaticEntity, Electric):
     energy_source: Optional[EnergySource] = None
     _height: float = 2
     _width: float = 2
+
+class ElectricEnergyInterface(ElectricalProducer):
+    """Represents a limitless energy source"""
+    energy_source: Optional[EnergySource] = None
+    _height: float = 2
+    _width: float = 2
+
+
 
 
 class Inserter(StaticEntity, Electric):

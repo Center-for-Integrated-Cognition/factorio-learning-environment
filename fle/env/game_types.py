@@ -141,6 +141,8 @@ class Prototype(enum.Enum, metaclass=PrototypeMetaclass):
     BigElectricPole = "big-electric-pole", ent.ElectricityPole
     Substation = "substation", ent.ElectricityPole
 
+    ElectricEnergyInterface = "electric-energy-interface", ent.ElectricEnergyInterface
+
     Coal = "coal", None
     Wood = "wood", None
     Sulfur = "sulfur", None

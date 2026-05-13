@@ -12,6 +12,7 @@ from fle.env.gym_env.action import Action
 from fle.commons.models.achievements import ProductionFlows
 from fle.commons.constants import REWARD_OVERRIDE_KEY
 from fle.env.utils.achievements import calculate_achievements
+from fle.env.entities import Position, WireColor
 from fle.agents import Response, TaskResponse
 from fle.env.gym_env.observation import (
     Observation,
@@ -485,7 +486,20 @@ class FactorioGymEnv(gym.Env):
         return self.instance.get_entity_state()
 
     def add_entities(self, entities) -> str:
-        return self.instance.add_entities(entities)
+        self.instance.add_entities(entities)
+
+    def add_circuit_connection(self, pos1: Position, pos2: Position, color: WireColor):
+        """Connects the two positions using a circuit wire of the given color"""
+        self.instance.add_circuit_connection(pos1, pos2, color)
+
+    def set_switch_state(self, switch_pos: Position, enabled: bool) -> None:
+        """Sets a switch at the given position to on/off, depending on the boolean"""
+        self.instance.set_switch_state(switch_pos, enabled)
+
+    def add_enabled_circuit_condition(self, entity_pos: Position) -> None:
+        """Will add a circuit condition to the given entity that
+            it will only be enabled if it gets a green signal"""
+        self.instance.add_enabled_circuit_condition(entity_pos)
 
     def reset_instance(self, state: Optional[GameState] = None, clear_entities: bool = False) -> None:
         """Reset the Factorio instance to a given state or initial state.

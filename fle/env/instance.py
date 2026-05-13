@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 
 from fle.env.lua_manager import LuaScriptManager
 from fle.env.namespace import FactorioNamespace
+from fle.env.entities import Position, WireColor
 from fle.env.utils.rcon import _lua2python
 from fle.commons.models.research_state import ResearchState
 from factorio_rcon import RCONClient
@@ -351,8 +352,21 @@ class FactorioInstance:
             compress=False,
         )
 
-    def add_entities(self, entities):
+    def add_entities(self, entities) -> None:
         self.first_namespace._load_entity_state(entities, decompress=False)
+
+    def add_circuit_connection(self, pos1: Position, pos2: Position, color: WireColor) -> None:
+        """Connects the two positions using a circuit wire of the given color"""
+        self.first_namespace._add_circuit_connection(pos1, pos2, color)
+
+    def set_switch_state(self, switch_pos: Position, enabled: bool) -> None:
+        """Sets a switch at the given position to on/off, depending on the boolean"""
+        self.first_namespace.set_switch_state(switch_pos, enabled)
+
+    def add_enabled_circuit_condition(self, entity_pos: Position) -> None:
+        """Will add a circuit condition to the given entity that
+            it will only be enabled if it gets a green signal"""
+        self.first_namespace._add_enabled_circuit_condition(entity_pos)
 
     def get_system_prompt(self, agent_idx: int = 0) -> str:
         """

@@ -9,7 +9,7 @@ global.actions.clear_entities = function(player_index)
                 "assembling-machine", "beacon", "boiler", "constant-combinator",
                 "container", "curved-rail", "decider-combinator", "electric-pole",
                 "electric-turret", "fluid-turret", "furnace", "gate", "generator",
-                "heat-interface", "heat-pipe", "inserter", "lab", "lamp",
+                "electric-energy-interface", "heat-interface", "heat-pipe", "inserter", "lab", "lamp",
                 "land-mine", "linked-belt", "linked-container", "loader",
                 "loader-1x1", "market", "mining-drill", "offshore-pump",
                 "pipe", "pipe-to-ground", "power-switch", "programmable-speaker",
