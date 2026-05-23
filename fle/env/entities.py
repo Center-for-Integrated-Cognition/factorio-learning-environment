@@ -3,6 +3,7 @@ from typing import Tuple, Any, Union, Dict, Literal
 from typing import List, Optional
 from enum import Enum, IntFlag, StrEnum
 from pydantic import ConfigDict, BaseModel, model_validator, model_serializer
+from dataclasses import dataclass
 
 
 class Layer(IntFlag):
@@ -38,6 +39,7 @@ class Layer(IntFlag):
         | LABELS
         | ELECTRICITY
     )
+
 
 
 # This should really live in `types`, but it's here to prevent a circular import
@@ -348,6 +350,15 @@ class IndexedPosition(Position):
     def __hash__(self):
         return hash(f"{self.x},{self.y},{self.type}")
 
+@dataclass
+class EntityReference:
+    """A struct used to identify a specific entity in the environment (used in find_entity)"""
+    name: str
+    x: float
+    y: float
+
+    def to_dict(self):
+        return { 'name': self.name, 'position': (self.x, self.y) }
 
 class EntityInfo(BaseModel):
     name: str
@@ -457,8 +468,9 @@ class BurnerType(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     fuel: Inventory = Inventory()  # Use this to check the fuel levels of the entity
 
-class WireColor(StrEnum):
-    """Choice of wire color, can be red or green"""
+class WireType(StrEnum):
+    """Type of Wire: can be copper, red, or green"""
+    COPPER = "copper"
     RED = "red"
     GREEN = "green"
 

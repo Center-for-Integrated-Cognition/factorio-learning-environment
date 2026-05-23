@@ -12,7 +12,7 @@ from fle.env.gym_env.action import Action
 from fle.commons.models.achievements import ProductionFlows
 from fle.commons.constants import REWARD_OVERRIDE_KEY
 from fle.env.utils.achievements import calculate_achievements
-from fle.env.entities import Position, WireColor
+from fle.env.entities import Position, WireType, EntityReference
 from fle.agents import Response, TaskResponse
 from fle.env.gym_env.observation import (
     Observation,
@@ -488,9 +488,12 @@ class FactorioGymEnv(gym.Env):
     def add_entities(self, entities) -> str:
         self.instance.add_entities(entities)
 
-    def add_circuit_connection(self, pos1: Position, pos2: Position, color: WireColor):
-        """Connects the two positions using a circuit wire of the given color"""
-        self.instance.add_circuit_connection(pos1, pos2, color)
+    def lookup_entity(self, entity: EntityReference) -> str:
+        return self.instance.lookup_entity(entity)
+
+    def connect_entities(self, entity1: EntityReference, entity2: EntityReference, wire_type: WireType) -> bool:
+        """Connects the two entities using a wire of the given type"""
+        return self.instance.connect_entities(entity1, entity2, wire_type)
 
     def set_switch_state(self, switch_pos: Position, enabled: bool) -> None:
         """Sets a switch at the given position to on/off, depending on the boolean"""

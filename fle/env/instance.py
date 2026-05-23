@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 
 from fle.env.lua_manager import LuaScriptManager
 from fle.env.namespace import FactorioNamespace
-from fle.env.entities import Position, WireColor
+from fle.env.entities import Position, WireType, EntityReference
 from fle.env.utils.rcon import _lua2python
 from fle.commons.models.research_state import ResearchState
 from factorio_rcon import RCONClient
@@ -355,9 +355,12 @@ class FactorioInstance:
     def add_entities(self, entities) -> None:
         self.first_namespace._load_entity_state(entities, decompress=False)
 
-    def add_circuit_connection(self, pos1: Position, pos2: Position, color: WireColor) -> None:
-        """Connects the two positions using a circuit wire of the given color"""
-        self.first_namespace._add_circuit_connection(pos1, pos2, color)
+    def lookup_entity(self, entity: EntityReference) -> str:
+        return self.first_namespace._lookup_entity(entity)
+
+    def connect_entities(self, entity1: EntityReference, entity2: EntityReference, wire_type: WireType) -> bool:
+        """Connects the two positions using a circuit wire of the given type"""
+        return self.first_namespace._connect_entities(entity1, entity2, wire_type)
 
     def set_switch_state(self, switch_pos: Position, enabled: bool) -> None:
         """Sets a switch at the given position to on/off, depending on the boolean"""
