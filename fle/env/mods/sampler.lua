@@ -142,9 +142,12 @@ end
 
 -- Entity types that should have is_working tracked but are not already iterated
 -- by other sampler loops (accumulators, generators, solar panels, inserters, drills, pipes).
+-- This list also includes miscellaneous electric consumers so actual_power
+-- bounds use the same demand set as the Python ElectricityGroup observation.
 local CRAFTING_ENTITY_TYPES = {
     "assembling-machine", "furnace", "lab", "rocket-silo",
-    "reactor", "beacon", "boiler"
+    "reactor", "beacon", "boiler",
+    "radar", "pump", "roboport", "electric-turret", "lamp"
 }
 
 -- Initialize global storage.  We ALWAYS reset on script load to avoid stale
@@ -857,7 +860,7 @@ end
 --   inserter      - type=inserter
 --   drill         - type=mining-drill
 --   pipe          - type=pipe / pipe-to-ground
---   crafting      - type in CRAFTING_ENTITY_TYPES (assembling-machine, furnace, lab, ...)
+--   crafting      - type in CRAFTING_ENTITY_TYPES (assembling-machine, furnace, lab, radar, ...)
 --   fluid         - any of {assembling-machine, mining-drill, boiler, generator,
 --                            offshore-pump, storage-tank, furnace} (for fluidbox loop)
 -- ---------------------------------------------------------------------------
@@ -935,7 +938,8 @@ local function tracker_bootstrap()
         "accumulator", "generator", "solar-panel", "inserter", "mining-drill",
         "pipe", "pipe-to-ground",
         "assembling-machine", "furnace", "lab", "rocket-silo", "reactor",
-        "beacon", "boiler", "offshore-pump", "storage-tank",
+        "beacon", "boiler", "radar", "pump", "roboport", "electric-turret", "lamp",
+        "offshore-pump", "storage-tank",
     }
     for _, e in pairs(surface.find_entities_filtered{type=types, force="player"}) do
         tracker_add(e)
@@ -960,6 +964,11 @@ local TRACKED_FILTER = {
     {filter="type", type="reactor"},
     {filter="type", type="beacon"},
     {filter="type", type="boiler"},
+    {filter="type", type="radar"},
+    {filter="type", type="pump"},
+    {filter="type", type="roboport"},
+    {filter="type", type="electric-turret"},
+    {filter="type", type="lamp"},
     {filter="type", type="offshore-pump"},
     {filter="type", type="storage-tank"},
 }
