@@ -142,9 +142,12 @@ end
 
 -- Entity types that should have is_working tracked but are not already iterated
 -- by other sampler loops (accumulators, generators, solar panels, inserters, drills, pipes).
+-- This list also includes miscellaneous electric consumers so actual_power
+-- bounds use the same demand set as the Python ElectricityGroup observation.
 local CRAFTING_ENTITY_TYPES = {
     "assembling-machine", "furnace", "lab", "rocket-silo",
-    "reactor", "beacon", "boiler"
+    "reactor", "beacon", "boiler",
+    "radar", "pump", "roboport", "electric-turret", "lamp"
 }
 
 -- Initialize global storage.  We ALWAYS reset on script load to avoid stale
@@ -157,7 +160,12 @@ global.sample_cursor = 0
 global.sampled_entities = {}
 global.sample_running_sums = {}
 global.sample_prototype_data = {}  -- {uid -> {max_energy_usage, drain, fuel_value}}
-global.sample_network_id = {}      -- {uid -> electric_network_id}
+global.sample_network_id = {}      -- {uid -> electric_network_id} (cached fallback only;
+                                   --  the actual_power pass prefers a LIVE lookup via
+                                   --  sample_entity_refs[uid].electric_network_id, because
+                                   --  power switches can split/merge networks at runtime
+                                   --  and the cached id goes stale.)
+global.sample_entity_refs = {}     -- {uid -> LuaEntity} for live network-id lookups
 global.inserter_prev_held = {}
 global.inserter_last_item = {}
 global.drill_prev_progress = {}
@@ -410,12 +418,17 @@ global.utils.register_for_sampling = function(entity)
     end)
     global.sample_prototype_data[uid] = proto_data
 
-    -- Store electric network ID for actual_power computation
+    -- Store electric network ID for actual_power computation.  This is a
+    -- cached fallback only; the actual_power pass prefers a live lookup
+    -- via global.sample_entity_refs[uid].electric_network_id, because
+    -- power switches can split/merge networks at runtime and the cached
+    -- id goes stale.
     pcall(function()
         if entity.electric_network_id then
             global.sample_network_id[uid] = entity.electric_network_id
         end
     end)
+    global.sample_entity_refs[uid] = entity
 end
 
 --- Get the rolling average for a property of an entity.
@@ -847,7 +860,7 @@ end
 --   inserter      - type=inserter
 --   drill         - type=mining-drill
 --   pipe          - type=pipe / pipe-to-ground
---   crafting      - type in CRAFTING_ENTITY_TYPES (assembling-machine, furnace, lab, ...)
+--   crafting      - type in CRAFTING_ENTITY_TYPES (assembling-machine, furnace, lab, radar, ...)
 --   fluid         - any of {assembling-machine, mining-drill, boiler, generator,
 --                            offshore-pump, storage-tank, furnace} (for fluidbox loop)
 -- ---------------------------------------------------------------------------
@@ -925,7 +938,8 @@ local function tracker_bootstrap()
         "accumulator", "generator", "solar-panel", "inserter", "mining-drill",
         "pipe", "pipe-to-ground",
         "assembling-machine", "furnace", "lab", "rocket-silo", "reactor",
-        "beacon", "boiler", "offshore-pump", "storage-tank",
+        "beacon", "boiler", "radar", "pump", "roboport", "electric-turret", "lamp",
+        "offshore-pump", "storage-tank",
     }
     for _, e in pairs(surface.find_entities_filtered{type=types, force="player"}) do
         tracker_add(e)
@@ -950,6 +964,11 @@ local TRACKED_FILTER = {
     {filter="type", type="reactor"},
     {filter="type", type="beacon"},
     {filter="type", type="boiler"},
+    {filter="type", type="radar"},
+    {filter="type", type="pump"},
+    {filter="type", type="roboport"},
+    {filter="type", type="electric-turret"},
+    {filter="type", type="lamp"},
     {filter="type", type="offshore-pump"},
     {filter="type", type="storage-tank"},
 }
@@ -982,6 +1001,7 @@ local function on_tracked_destroyed(event)
         global.sample_running_sums[uid] = nil
         global.sample_prototype_data[uid] = nil
         global.sample_network_id[uid] = nil
+        global.sample_entity_refs[uid] = nil
         global.sampled_entities[uid] = nil
         global.inserter_prev_held[uid] = nil
         global.inserter_last_item[uid] = nil
@@ -1026,6 +1046,63 @@ script.on_nth_tick(1, function(event)
     -- find_entities_filtered scan per tick.
     local net_production = {}  -- network_id -> J/tick
 
+    -- -----------------------------------------------------------------------
+    -- Union-find across closed power switches.
+    -- Factorio assigns a distinct electric_network_id to each segment on
+    -- either side of a power switch *even when the switch is closed* (i.e.
+    -- power is flowing).  Without merging those ids the actual_power pass
+    -- would see "demand on net B, production on net A → satisfaction 0".
+    -- Mirrors fle/env/tools/agent/connect_entities/groupable_entities.py's
+    -- agglomerate_groupable_entities power-switch union-find.
+    --
+    -- net_canonical[nid] = canonical (smallest) nid in nid's merged group;
+    -- absent key means the network has no merges (use nid as-is).
+    local net_canonical = {}
+    local function canon(nid)
+        local c = nid
+        while net_canonical[c] do c = net_canonical[c] end
+        return c
+    end
+    do
+        local switches = surface.find_entities_filtered{type = "power-switch"}
+        for _, sw in ipairs(switches) do
+            if sw.valid and sw.power_switch_state then
+                -- Collect distinct network ids touching this switch via its
+                -- copper connections.  In closed state both sides are wired
+                -- together but Factorio still reports separate network ids.
+                local nids = {}
+                local seen = {}
+                pcall(function()
+                    local conns = sw.copper_connection_definitions
+                    if conns then
+                        for _, conn in ipairs(conns) do
+                            local pole = conn.target_entity
+                            if pole and pole.valid and pole.electric_network_id then
+                                local pn = pole.electric_network_id
+                                if not seen[pn] then
+                                    seen[pn] = true
+                                    nids[#nids + 1] = pn
+                                end
+                            end
+                        end
+                    end
+                end)
+                -- Union all pairs under the smallest canonical id.
+                if #nids >= 2 then
+                    local target = canon(nids[1])
+                    for i = 2, #nids do
+                        local b = canon(nids[i])
+                        if b ~= target then
+                            local lo, hi = math.min(target, b), math.max(target, b)
+                            net_canonical[hi] = lo
+                            target = lo
+                        end
+                    end
+                end
+            end
+        end
+    end
+
     -- Sample accumulators
     for uid, entity in pairs(global.tracked_entities.accumulator) do
         if entity.valid then
@@ -1059,6 +1136,7 @@ script.on_nth_tick(1, function(event)
             -- Accumulate per-network production for actual_power pass.
             local nid = entity.electric_network_id
             if nid then
+                nid = canon(nid)
                 net_production[nid] = (net_production[nid] or 0) + egen
             end
             update_is_working(entity, uid, cursor)
@@ -1093,6 +1171,7 @@ script.on_nth_tick(1, function(event)
             -- Accumulate per-network production for actual_power pass.
             local nid = entity.electric_network_id
             if nid then
+                nid = canon(nid)
                 net_production[nid] = (net_production[nid] or 0) + val
             end
             update_is_working(entity, uid, cursor)
@@ -1242,10 +1321,25 @@ script.on_nth_tick(1, function(event)
                     iw = s["is_working"][cursor] or 0
                 end
                 local requested = pd.drain + (pd.max_energy_usage - pd.drain) * iw
-                -- Find network id from sampled_entities
-                -- We stored it during registration or can look up now
-                local nid = global.sample_network_id[uid]
+                -- Find network id.  Power switches can split/merge networks at
+                -- runtime, so the cached sample_network_id[uid] may be stale
+                -- (matching a no-longer-existing network whose net_production
+                -- is 0 → satisfaction 0 → actual_power 0 forever).  Prefer a
+                -- LIVE lookup via the stored entity reference, fall back to
+                -- the cache only if the entity is gone.
+                local nid = nil
+                local ent = global.sample_entity_refs[uid]
+                if ent and ent.valid then
+                    nid = ent.electric_network_id
+                    if nid then
+                        global.sample_network_id[uid] = nid
+                    end
+                end
+                if not nid then
+                    nid = global.sample_network_id[uid]
+                end
                 if nid then
+                    nid = canon(nid)
                     net_demand[nid] = (net_demand[nid] or 0) + requested
                     consumer_tick_data[#consumer_tick_data + 1] = {
                         uid = uid, nid = nid, requested = requested,
