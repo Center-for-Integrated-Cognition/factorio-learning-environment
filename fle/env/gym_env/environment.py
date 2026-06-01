@@ -412,8 +412,12 @@ class FactorioGymEnv(gym.Env):
         )
 
         # Execute the action
+        # MetaCALM: timeout bumped from 60s -> 600s so long-running
+        # recording sleeps (e.g. sleep(400) at modest speeds) don't get
+        # cancelled mid-call, which strands the RCON socket_locked flag
+        # and produces ClientBusy on every subsequent call.
         initial_score, eval_time, result = self.instance.eval(
-            action.code, agent_idx=agent_idx, timeout=60
+            action.code, agent_idx=agent_idx, timeout=600
         )
         # Check for errors
         error_occurred = "error" in result.lower() or "exception: " in result.lower()

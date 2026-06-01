@@ -423,7 +423,7 @@ class FactorioInstance:
         finally:
             signal.alarm(0)
 
-    def eval_with_error(self, expr, agent_idx=0, timeout=60):
+    def eval_with_error(self, expr, agent_idx=0, timeout=600):
         """Evaluate an expression with a timeout, and return the result without error handling"""
 
         # Submit the evaluation to the thread pool
@@ -442,7 +442,7 @@ class FactorioInstance:
             # Re-raise any other exceptions
             raise
 
-    def eval(self, expr, agent_idx=0, timeout=60):
+    def eval(self, expr, agent_idx=0, timeout=600):
         "Evaluate several lines of input, returning the result of the last line with a timeout"
         try:
             return self.eval_with_error(expr, agent_idx, timeout)
