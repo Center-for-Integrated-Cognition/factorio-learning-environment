@@ -488,21 +488,17 @@ class FactorioGymEnv(gym.Env):
     def add_entities(self, entities) -> str:
         self.instance.add_entities(entities)
 
-    def lookup_entity(self, entity: EntityReference) -> str:
-        return self.instance.lookup_entity(entity)
+    def add_resource(self, name: str, position: Position, amount: int) -> bool:
+        """Adds the given resource to the map surface"""
+        return self.instance.add_resource(name, position, amount)
 
-    def connect_entities(self, entity1: EntityReference, entity2: EntityReference, wire_type: WireType) -> bool:
+    def add_wire_connection(self, entity1: EntityReference, entity1_side: str, entity2: EntityReference, entity2_side: str, wire_type: WireType) -> bool:
         """Connects the two entities using a wire of the given type"""
-        return self.instance.connect_entities(entity1, entity2, wire_type)
+        return self.instance.add_wire_connection(entity1, entity1_side, entity2, entity2_side, wire_type)
 
-    def set_switch_state(self, switch_pos: Position, enabled: bool) -> None:
-        """Sets a switch at the given position to on/off, depending on the boolean"""
-        self.instance.set_switch_state(switch_pos, enabled)
-
-    def add_enabled_circuit_condition(self, entity_pos: Position) -> None:
-        """Will add a circuit condition to the given entity that
-            it will only be enabled if it gets a green signal"""
-        self.instance.add_enabled_circuit_condition(entity_pos)
+    def set_control_behavior(self, entity: EntityReference, behavior_info: str) -> bool:
+        """Sets the control behavior of the given entity"""
+        return self.instance.set_control_behavior(entity, behavior_info)
 
     def reset_instance(self, state: Optional[GameState] = None, clear_entities: bool = False) -> None:
         """Reset the Factorio instance to a given state or initial state.

@@ -352,24 +352,20 @@ class FactorioInstance:
             compress=False,
         )
 
+    def add_resource(self, name: str, position: Position, amount: int) -> bool:
+        """Adds the given resource to the map surface"""
+        return self.first_namespace._add_resource(name, position, amount)
+
     def add_entities(self, entities) -> None:
         self.first_namespace._load_entity_state(entities, decompress=False)
 
-    def lookup_entity(self, entity: EntityReference) -> str:
-        return self.first_namespace._lookup_entity(entity)
-
-    def connect_entities(self, entity1: EntityReference, entity2: EntityReference, wire_type: WireType) -> bool:
+    def add_wire_connection(self, entity1: EntityReference, entity1_side: str, entity2: EntityReference, entity2_side: str, wire_type: WireType) -> bool:
         """Connects the two positions using a circuit wire of the given type"""
-        return self.first_namespace._connect_entities(entity1, entity2, wire_type)
+        return self.first_namespace._add_wire_connection(entity1, entity1_side, entity2, entity2_side, wire_type)
 
-    def set_switch_state(self, switch_pos: Position, enabled: bool) -> None:
-        """Sets a switch at the given position to on/off, depending on the boolean"""
-        self.first_namespace.set_switch_state(switch_pos, enabled)
-
-    def add_enabled_circuit_condition(self, entity_pos: Position) -> None:
-        """Will add a circuit condition to the given entity that
-            it will only be enabled if it gets a green signal"""
-        self.first_namespace._add_enabled_circuit_condition(entity_pos)
+    def set_control_behavior(self, entity: EntityReference, behavior_info: str) -> bool:
+        """Sets the control behavior of the given entity"""
+        return self.first_namespace._set_control_behavior(entity, behavior_info)
 
     def get_system_prompt(self, agent_idx: int = 0) -> str:
         """

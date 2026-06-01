@@ -358,7 +358,7 @@ class EntityReference:
     y: float
 
     def to_dict(self):
-        return { 'name': self.name, 'position': (self.x, self.y) }
+        return { 'name': self.name, 'position': [self.x, self.y] }
 
 class EntityInfo(BaseModel):
     name: str
