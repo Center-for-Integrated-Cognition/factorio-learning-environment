@@ -12,7 +12,7 @@ global.actions.add_resource = function(player_index, name, pos, amount)
 	end
 
 	--- Make sure mining drills are updated with patch info
-    for e in surface.find_entities_filtered{type="mining-drill", position=pos, radius=5 } do
+    for _, e in pairs(surface.find_entities_filtered{type="mining-drill", position=pos, radius=5 }) do
         e.update_connections()
     end
 end
