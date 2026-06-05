@@ -76,7 +76,7 @@ global.actions.pickup_entity = function(player_index, x, y, entity)
 
                 if ent.can_be_destroyed() then
                     -- game.print("Picked up placed "..ent.name)
-                    pcall(ent.destroy{raise_destroy=false, do_cliff_correction=false})
+                    pcall(ent.destroy{raise_destroy=true, do_cliff_correction=false})
                     return true
                 end
             end
