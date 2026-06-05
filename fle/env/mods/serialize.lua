@@ -943,6 +943,18 @@ global.utils.serialize_entity = function(entity)
         end
         -- Convert from per-tick to per-second (Watts)
         serialized.flow_rate = flow_per_tick * 60
+
+        local connected_ids = {}
+        local neighbours = entity.neighbours
+        if neighbours and neighbours.copper then
+            for _, neighbour in ipairs(neighbours.copper) do
+                if neighbour.valid and neighbour.unit_number then
+                    table.insert(connected_ids, neighbour.unit_number)
+                end
+            end
+        end
+        table.sort(connected_ids)
+        serialized.connected_electric_entity_ids = connected_ids
     end
 
     -- Power switch: serialize state and which poles are connected on each side
