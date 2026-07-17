@@ -47,9 +47,9 @@ global.actions.add_wire_connection = function(player_index, entity1_ref, entity1
     local function resolve_circuit_id(entity_name, entity_side)
         if entity_name == "arithmetic-combinator" or entity_name == "decider-combinator" then
             if entity_side == "input" then
-                return defines.circuit_connection_id.combinator_input
+                return defines.circuit_connector_id.combinator_input
             elseif entity_side == "output" then
-                return defines.circuit_connection_id.combinator_output
+                return defines.circuit_connector_id.combinator_output
             else
                 return nil, "error: invalid side '" .. tostring(entity_side) .. "' for combinator, must be 'input' or 'output'"
             end
