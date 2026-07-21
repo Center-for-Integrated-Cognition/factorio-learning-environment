@@ -815,8 +815,8 @@ global.utils.serialize_entity = function(entity)
     }
     serialized.neighbours = serialize_neighbours(entity)
 
-    -- Add input and output locations if the entity is a transport belt
-    if entity.type == "transport-belt" or entity.type == "underground-belt" then
+    -- Loaders use the same belt endpoints and transport lines as belts.
+    if entity.type == "transport-belt" or entity.type == "underground-belt" or entity.type == "loader" then
         local x, y = entity.position.x, entity.position.y
 
         -- Initialize positions with default offsets based on belt direction
