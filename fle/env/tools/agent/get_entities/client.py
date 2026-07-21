@@ -174,8 +174,12 @@ class GetEntities(Tool):
                 try:
                     if "inventory" in entity_data:
                         if isinstance(entity_data["inventory"], list):
-                            for inv in entity_data["inventory"]:
-                                entity_data["inventory"] += inv
+                            entity_data["inventory"] = [
+                                self.process_nested_dict(inv)
+                                if isinstance(inv, dict)
+                                else inv
+                                for inv in entity_data["inventory"]
+                            ]
                         else:
                             inventory_data = {
                                 k: v
