@@ -107,9 +107,6 @@ class Prototype(enum.Enum, metaclass=PrototypeMetaclass):
     Splitter = "splitter", ent.Splitter
     FastSplitter = "fast-splitter", ent.Splitter
     ExpressSplitter = "express-splitter", ent.Splitter
-    Loader = "loader", ent.Entity
-    FastLoader = "fast-loader", ent.Entity
-    ExpressLoader = "express-loader", ent.Entity
 
     Rail = "rail", ent.Rail
 
@@ -140,7 +137,6 @@ class Prototype(enum.Enum, metaclass=PrototypeMetaclass):
     IronChest = "iron-chest", ent.Chest
     InfinityChest = "infinity-chest", ent.InfinityChest
     WoodenChest = "wooden-chest", ent.Chest
-    InfinityChest = "infinity-chest", ent.Chest
     IronGearWheel = "iron-gear-wheel", ent.Entity
     StorageTank = "storage-tank", ent.StorageTank
 
