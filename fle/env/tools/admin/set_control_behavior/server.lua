@@ -21,7 +21,6 @@ global.actions.set_control_behavior = function(player_index, entity_ref, behavio
         }
     end
 
-
     -- Behavior for power switch
     if entity_ref.name == "power-switch" then
         behavior.circuit_condition = {

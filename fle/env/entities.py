@@ -663,6 +663,12 @@ class UndergroundBelt(TransportBelt):
     _height: float = 1
     _width: float = 1
 
+class Loader(TransportBelt):
+    """An entity that loads chest -> belt directly (or vice-versa)"""
+    is_input: bool # If True, loads belt -> chest, if False, loads chest -> belt
+
+    _height: float = 1
+    _width: float = 2
 
 class MiningDrill(StaticEntity):
     """Base class for mining drills that extract resources.
@@ -873,6 +879,29 @@ class Chest(Entity):
     """A storage chest."""
 
     inventory: Inventory = Inventory()
+    _height: float = 1
+    _width: float = 1
+
+
+class InfinityFilterMode(StrEnum):
+    """The valid mode options for an InfinityInventoryFilter"""
+    AT_LEAST = "at-least"   # Will ensure the container has at least [count] items (source)
+    AT_MOST = "at-most"     # Will ensure the container has at most [count] items (sink)
+    EXACTLY = "exactly"     # Will ensure the container has exactly [count] items (source + sink)
+
+@dataclass
+class InfinityInventoryFilter:
+    """A single filter for an infinity contianer,
+        defines an item name + count, plus the desired mode"""
+    name: str
+    count: int
+    mode: InfinityFilterMode = InfinityFilterMode.AT_LEAST
+
+
+class InfinityChest(Chest):
+    """A storage chest that can act as an infinity source/sink."""
+    infinity_container_filters: List[InfinityInventoryFilter]
+
     _height: float = 1
     _width: float = 1
 

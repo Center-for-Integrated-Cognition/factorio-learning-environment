@@ -145,7 +145,7 @@ global.actions.load_entity_state = function(player, stored_json_data)
         local state = data.state
         local entity_type = entity.type
 
-        -- game.print("Processing entity: " .. entity.name .. " (type: " .. entity_type .. ")")
+        game.print("Processing entity: " .. entity.name .. " (type: " .. entity_type .. ")")
 
         -- Restore inventories based on entity type
         for inv_name, contents in pairs(state.inventories or {}) do
@@ -153,6 +153,8 @@ global.actions.load_entity_state = function(player, stored_json_data)
 
             -- Only try to access inventories that match the entity type
             if inv_name == "chest" and entity_type == "container" then
+                inventory = entity.get_inventory(defines.inventory.chest)
+			elseif inv_name == "chest" and entity_type == "infinity-container" then
                 inventory = entity.get_inventory(defines.inventory.chest)
             elseif inv_name == "furnace_source" and entity_type == "furnace" then
                 inventory = entity.get_inventory(defines.inventory.furnace_source)
@@ -231,6 +233,21 @@ global.actions.load_entity_state = function(player, stored_json_data)
             end
         end
 
+		-- Restore infinity container filters
+		if entity_type == "infinity-container" and state.infinity_container_filters then
+			filters = { }
+			for _, filter in pairs(state.infinity_container_filters) do
+				local idx = #filters + 1
+				filters[idx] = {
+					name = filter.name,
+					count = filter.count,
+					mode = filter.mode,
+					index = idx
+				}
+			end
+			entity.infinity_container_filters = filters
+		end
+
         -- Restore transport belt contents
         if entity_type == "transport-belt" and state.transport_lines then
             -- game.print("Has transport_lines field: " .. tostring(state.transport_lines ~= nil))
@@ -275,6 +292,12 @@ global.actions.load_entity_state = function(player, stored_json_data)
                 end
             end
         end
+
+		if entity_type == "loader" and state.loader_type then
+			entity.loader_type = state.loader_type
+			-- Need to set direction again because setting loader_type might flip it
+			entity.direction = state.direction
+		end
 
         -- Restore energy and active state
         if state.energy then

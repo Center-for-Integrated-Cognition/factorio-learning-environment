@@ -504,6 +504,11 @@ class FactorioGymEnv(gym.Env):
         """Sets the control behavior of the given entity"""
         return self.instance.set_control_behavior(entity, behavior_info)
 
+    def add_to_inventory(self, item_counts: dict) -> bool:
+        """Adds the given items to the player's inventory
+            item_counts: dict{name:str -> count:int}"""
+        return self.instance.add_to_inventory(item_counts)
+
     def reset_instance(self, state: Optional[GameState] = None, clear_entities: bool = False) -> None:
         """Reset the Factorio instance to a given state or initial state.
 

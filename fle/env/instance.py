@@ -367,6 +367,12 @@ class FactorioInstance:
         """Sets the control behavior of the given entity"""
         return self.first_namespace._set_control_behavior(entity, behavior_info)
 
+    def add_to_inventory(self, item_counts: dict) -> bool:
+        """Adds the given items to the player's inventory
+            item_counts: dict{name:str -> count:int}"""
+        return self.first_namespace.add_to_inventory(item_counts)
+
+
     def get_system_prompt(self, agent_idx: int = 0) -> str:
         """
         Get the system prompt for the Factorio environment.

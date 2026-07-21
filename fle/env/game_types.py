@@ -116,6 +116,9 @@ class Prototype(enum.Enum, metaclass=PrototypeMetaclass):
     ExpressUndergroundBelt = "express-underground-belt", ent.UndergroundBelt
     FastUndergroundBelt = "fast-underground-belt", ent.UndergroundBelt
     UndergroundBelt = "underground-belt", ent.UndergroundBelt
+    Loader = "loader", ent.Loader
+    FastLoader = "fast-loader", ent.Loader
+    ExpressLoader = "express-loader", ent.Loader
     OffshorePump = "offshore-pump", ent.OffshorePump
     PumpJack = "pumpjack", ent.PumpJack
     Pump = "pump", ent.Pump
@@ -132,6 +135,7 @@ class Prototype(enum.Enum, metaclass=PrototypeMetaclass):
 
     SteelChest = "steel-chest", ent.Chest
     IronChest = "iron-chest", ent.Chest
+    InfinityChest = "infinity-chest", ent.InfinityChest
     WoodenChest = "wooden-chest", ent.Chest
     IronGearWheel = "iron-gear-wheel", ent.Entity
     StorageTank = "storage-tank", ent.StorageTank

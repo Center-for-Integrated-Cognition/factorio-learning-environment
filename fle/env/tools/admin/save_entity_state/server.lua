@@ -275,6 +275,10 @@ global.actions.save_entity_state = function(player_index, distance, player_entit
                     end
                 end
 
+            elseif entity.type == "loader" then
+				-- Type of loader, either 'input' or 'output'
+				state.loader_type = entity.loader_type
+
             elseif entity.type == "mining-drill" then
                 state.drop_position = serialize_position(entity.drop_position)
 
@@ -306,6 +310,17 @@ global.actions.save_entity_state = function(player_index, distance, player_entit
                     }
                     state.steam_output_point = serialize_position({x = x - 2, y = y})
                 end
+
+			elseif entity.type == "infinity-container" then
+				-- Serialize infinity container settings
+				state.infinity_container_filters = {}
+				for idx, filter in pairs(entity.infinity_container_filters) do
+					state.infinity_container_filters[idx] = {
+						name = '"' .. filter.name .. '"',
+						count = filter.count,
+						mode = '"' .. filter.mode .. '"'
+					}
+				end
             end
 
             table.insert(entity_array, state)

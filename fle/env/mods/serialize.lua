@@ -928,6 +928,11 @@ global.utils.serialize_entity = function(entity)
         serialized.belt_group_id = global.belt_group_map[entity.unit_number] or 0
     end
 
+	-- Loaders get their loader_type set
+	if entity.type == "loader" then
+		serialized.is_input = entity.loader_type == "input"
+	end
+
     serialized.id = entity.unit_number
 
     -- Special handling for power poles
@@ -1612,6 +1617,18 @@ global.utils.serialize_entity = function(entity)
             serialized.pumping_speed = entity.prototype.pumping_speed
         end
     end
+
+	-- Add settings for an infinity chest
+	if entity.type == "infinity-container" then
+		serialized.infinity_container_filters = {}
+		for idx, filter in pairs(entity.infinity_container_filters) do
+			serialized.infinity_container_filters[idx] = {
+				name = '"' .. filter.name .. '"',
+				count = filter.count,
+				mode = '"' .. filter.mode .. '"'
+			}
+		end
+	end
 
     -- If entity has a fluidbox
     if entity.fluidbox then
