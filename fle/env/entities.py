@@ -860,6 +860,7 @@ class ElectricityPole(Entity, Electric):
 class Furnace(Entity, BurnerType):
     """A furnace for smelting items"""
 
+    recipe: Optional[Recipe] = None
     furnace_source: Inventory = Inventory()
     furnace_result: Inventory = Inventory()
     _height: float = 2
@@ -869,6 +870,7 @@ class Furnace(Entity, BurnerType):
 class ElectricFurnace(Entity, Electric):
     """An electrically-powered furnace."""
 
+    recipe: Optional[Recipe] = None
     furnace_source: Inventory = Inventory()
     furnace_result: Inventory = Inventory()
     _height: float = 3
