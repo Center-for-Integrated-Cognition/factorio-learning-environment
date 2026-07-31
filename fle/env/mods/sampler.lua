@@ -868,6 +868,7 @@ global.tracked_entities = global.tracked_entities or {
     accumulator = {},
     generator   = {},
     solar       = {},
+    interface   = {},
     inserter    = {},
     drill       = {},
     pipe        = {},
@@ -898,10 +899,12 @@ local function tracker_add(entity)
     local uid = entity.unit_number
     local etype = entity.type
     local te = global.tracked_entities
+    te.interface = te.interface or {}
 
     if etype == "accumulator" then te.accumulator[uid] = entity end
     if etype == "generator"   then te.generator[uid]   = entity end
     if etype == "solar-panel" then te.solar[uid]       = entity end
+    if etype == "electric-energy-interface" then te.interface[uid] = entity end
     if etype == "inserter"    then te.inserter[uid]    = entity end
     if etype == "mining-drill" then te.drill[uid]      = entity end
     if etype == "pipe" or etype == "pipe-to-ground" then te.pipe[uid] = entity end
@@ -913,9 +916,11 @@ end
 local function tracker_remove(uid)
     if not uid then return end
     local te = global.tracked_entities
+    te.interface = te.interface or {}
     te.accumulator[uid] = nil
     te.generator[uid]   = nil
     te.solar[uid]       = nil
+    te.interface[uid]   = nil
     te.inserter[uid]    = nil
     te.drill[uid]       = nil
     te.pipe[uid]        = nil
@@ -935,7 +940,7 @@ local function tracker_bootstrap()
     -- One broad scan covering every type we care about.  This is a single
     -- O(surface) call paid once, replacing 10+ per-tick scans forever.
     local types = {
-        "accumulator", "generator", "solar-panel", "inserter", "mining-drill",
+        "accumulator", "generator", "solar-panel", "electric-energy-interface", "inserter", "mining-drill",
         "pipe", "pipe-to-ground",
         "assembling-machine", "furnace", "lab", "rocket-silo", "reactor",
         "beacon", "boiler", "radar", "pump", "roboport", "electric-turret", "lamp",
@@ -953,6 +958,7 @@ local TRACKED_FILTER = {
     {filter="type", type="accumulator"},
     {filter="type", type="generator"},
     {filter="type", type="solar-panel"},
+    {filter="type", type="electric-energy-interface"},
     {filter="type", type="inserter"},
     {filter="type", type="mining-drill"},
     {filter="type", type="pipe"},
@@ -1045,6 +1051,7 @@ script.on_nth_tick(1, function(event)
     -- Filled in-place during the generator/solar loops to avoid a second
     -- find_entities_filtered scan per tick.
     local net_production = {}  -- network_id -> J/tick
+    local external_supply_networks = {}  -- network_id -> true
 
     -- -----------------------------------------------------------------------
     -- Union-find across closed power switches.
@@ -1175,6 +1182,23 @@ script.on_nth_tick(1, function(event)
                 net_production[nid] = (net_production[nid] or 0) + val
             end
             update_is_working(entity, uid, cursor)
+        end
+    end
+
+    -- Electric energy interfaces are deliberate external/unbounded sources in
+    -- the scenario fixtures. Their output is demand-driven, so mark the whole
+    -- network as fully supplied instead of trying to represent math.huge as a
+    -- sampled production value.
+    for _, entity in pairs(global.tracked_entities.interface) do
+        if entity.valid then
+            if not global.energy_samples[entity.unit_number] then
+                global.utils.register_for_sampling(entity)
+            end
+            local nid = entity.electric_network_id
+            if nid then
+                external_supply_networks[canon(nid)] = true
+            end
+            update_is_working(entity, entity.unit_number, cursor)
         end
     end
 
@@ -1355,7 +1379,9 @@ script.on_nth_tick(1, function(event)
         local demand = net_demand[cd.nid] or 0
         local satisfaction = 1.0
         if demand > 0 then
-            satisfaction = math.min(production / demand, 1.0)
+            satisfaction = external_supply_networks[cd.nid]
+                and 1.0
+                or math.min(production / demand, 1.0)
         end
         local actual = cd.requested * satisfaction
         local s = global.energy_samples[cd.uid]
